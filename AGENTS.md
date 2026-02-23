@@ -29,14 +29,15 @@ After meaningful work, update `MEMORY.md`:
 ## CI Failure Triage Flow
 
 1. Prefer artifact diagnostics over pasted logs.
-2. Read `/tmp/cpo-ci-diagnostics/summary.txt` first.
-3. Then inspect:
+2. Check validation report artifact first (`/tmp/cpo-ci-validation-report.json`) for which gate failed.
+3. Read `/tmp/cpo-ci-diagnostics/summary.txt` first.
+4. Then inspect:
    - `prometheus/query_capacity_alerts.json`
    - `prometheus/query_capacity_metrics.json`
    - `prometheus/targets.json`
    - `monitoring/prometheusrules-all.yaml`
    - `monitoring/servicemonitors-all.yaml`
-4. Patch root cause, not only the symptom.
+5. Patch root cause, not only the symptom.
 
 ## Repo Conventions
 

@@ -33,6 +33,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
+      - name: Verify Go toolchain
+        run: go version
+
       - name: Install kubectl (pinned)
         run: |
           mkdir -p "${HOME}/bin"
@@ -73,6 +76,15 @@ jobs:
         env:
           EXPECTED_KUBE_CONTEXT: k3d-${{ env.CLUSTER_NAME }}
         run: bash hack/ci/k3s_integration.sh
+
+      - name: Upload Validation Report Artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: k3s-integration-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/cpo-ci-validation-report.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Collect Diagnostics on Failure
         if: ${{ failure() }}
