@@ -18,6 +18,7 @@ jobs:
     env:
       CLUSTER_NAME: cpo-ci
       OPERATOR_IMAGE: capacity-planning-operator:ci
+      EXTRA_IMAGES: busybox:1.36
       K3D_VERSION: v5.7.5
       K3S_IMAGE: rancher/k3s:v1.32.2-k3s1
       KUBECTL_VERSION: v1.32.2
@@ -71,7 +72,7 @@ jobs:
         run: docker build -t "${OPERATOR_IMAGE}" .
 
       - name: Import Image into k3s
-        run: k3d image import "${OPERATOR_IMAGE}" -c "${CLUSTER_NAME}"
+        run: bash hack/ci/import_image_k3d.sh
 
       - name: Run K3s Integration Checks
         env:

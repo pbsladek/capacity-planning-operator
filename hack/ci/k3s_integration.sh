@@ -201,6 +201,14 @@ wait_for_manager_rollout() {
       last_status="${now}"
     fi
 
+    # Fail fast on terminal image pull states.
+    if kubectl -n "${OP_NS}" get pods -l control-plane=controller-manager \
+      -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null \
+      | grep -Eq '^(ImagePullBackOff|ErrImagePull)$'; then
+      dump_manager_rollout_diagnostics "${deploy_name}"
+      fail "deployment/${deploy_name} hit ImagePullBackOff/ErrImagePull during rollout"
+    fi
+
     if (( elapsed >= timeout_seconds )); then
       dump_manager_rollout_diagnostics "${deploy_name}"
       fail "timed out waiting for deployment/${deploy_name} rollout after ${timeout_seconds}s"
@@ -269,6 +277,7 @@ ensure_manager_deploy() {
     escaped="$(json_escape "${OPERATOR_IMAGE}")"
     patch_ops+="{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"${escaped}\"}"
   fi
+  patch_ops+="${patch_ops:+,}{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Never\"}"
 
   for arg in "${desired_args[@]}"; do
     if ! grep -Fxq -- "${arg}" <<<"${args_text}"; then
