@@ -58,9 +58,12 @@ summarize_diagnostics() {
   last_reconcile="$(first_match_value "lastReconcileTime:" "${cp_yaml}")"
 
   local target_up_count target_down_count cm_mentions
-  target_up_count="$(grep -o '"health":"up"' "${prom_targets}" 2>/dev/null | wc -l | tr -d ' ')"
-  target_down_count="$(grep -o '"health":"down"' "${prom_targets}" 2>/dev/null | wc -l | tr -d ' ')"
-  cm_mentions="$(grep -o 'controller-manager' "${prom_targets}" 2>/dev/null | wc -l | tr -d ' ')"
+  target_up_count="$(grep -c '"health":"up"' "${prom_targets}" 2>/dev/null || true)"
+  target_down_count="$(grep -c '"health":"down"' "${prom_targets}" 2>/dev/null || true)"
+  cm_mentions="$(grep -c 'controller-manager' "${prom_targets}" 2>/dev/null || true)"
+  target_up_count="${target_up_count:-0}"
+  target_down_count="${target_down_count:-0}"
+  cm_mentions="${cm_mentions:-0}"
 
   local capacity_alert_state capacity_metric_state controller_up_state
   if json_query_has_results "${prom_alerts_q}"; then

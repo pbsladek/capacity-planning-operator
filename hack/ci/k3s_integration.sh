@@ -202,7 +202,7 @@ manager_metrics_have_capacity_series() {
 prometheus_instant_scalar() {
   local query="$1"
   local out val
-  out="$(curl -fsS --max-time 5 --get --data-urlencode "query=${query}" http://127.0.0.1:19090/api/v1/query || true)"
+  out="$(curl -fsS --max-time 5 --get --data-urlencode "query=${query}" http://127.0.0.1:19090/api/v1/query 2>/dev/null || true)"
   [[ -n "${out}" ]] || return 1
   val="$(printf '%s' "${out}" | sed -n 's/.*"value":[[][^,]*,"\([^"]*\)"[]].*/\1/p' | head -n1)"
   [[ -n "${val}" ]] || return 1
@@ -227,7 +227,8 @@ compare_growth_calculations() {
     [[ -n "${name}" ]] || continue
     [[ "${status_growth:-}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]] || continue
 
-    raw_growth="$(prometheus_instant_scalar "deriv(max(kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"${name}\"})[${duration}]) * 86400" || true)"
+    # deriv() operates on a range vector; compute per-series derivative first, then aggregate.
+    raw_growth="$(prometheus_instant_scalar "max(deriv(kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"${name}\"}[${duration}])) * 86400" || true)"
     if [[ ! "${raw_growth:-}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
       echo "  ${name} ${status_growth} n/a n/a n/a no-data"
       continue
