@@ -21,6 +21,8 @@ PROM_ENDPOINT_READY_TIMEOUT_SECONDS="${PROM_ENDPOINT_READY_TIMEOUT_SECONDS:-300}
 ALERT_ENDPOINT_READY_TIMEOUT_SECONDS="${ALERT_ENDPOINT_READY_TIMEOUT_SECONDS:-300}"
 ALERT_PROPAGATION_TIMEOUT_SECONDS="${ALERT_PROPAGATION_TIMEOUT_SECONDS:-900}"
 MANAGER_ENDPOINT_READY_TIMEOUT_SECONDS="${MANAGER_ENDPOINT_READY_TIMEOUT_SECONDS:-180}"
+MANAGER_ROLLOUT_TIMEOUT_SECONDS="${MANAGER_ROLLOUT_TIMEOUT_SECONDS:-420}"
+ROLLOUT_STATUS_INTERVAL_SECONDS="${ROLLOUT_STATUS_INTERVAL_SECONDS:-15}"
 
 fail() {
   echo "ERROR: $*" >&2
@@ -75,7 +77,7 @@ wait_until() {
 
 http_ok() {
   local url="$1"
-  curl -fsS --max-time 5 "${url}" >/dev/null
+  curl -fs --max-time 5 "${url}" >/dev/null 2>&1
 }
 
 port_forward_running() {
@@ -134,6 +136,79 @@ manager_metrics_have_capacity_series() {
   grep -q "^capacityplan_pvc_anomaly" <<<"${out}" || return 1
 }
 
+to_int_or_zero() {
+  local v="${1:-}"
+  if [[ "${v}" =~ ^[0-9]+$ ]]; then
+    printf '%s' "${v}"
+  else
+    printf '0'
+  fi
+}
+
+dump_manager_rollout_diagnostics() {
+  local deploy_name="$1"
+  echo
+  echo "---- rollout diagnostics (${OP_NS}/${deploy_name}) ----"
+  kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o wide || true
+  kubectl -n "${OP_NS}" describe "deployment/${deploy_name}" || true
+  kubectl -n "${OP_NS}" get rs -l control-plane=controller-manager -o wide --sort-by=.metadata.creationTimestamp || true
+  kubectl -n "${OP_NS}" get pods -l control-plane=controller-manager -o wide || true
+  kubectl -n "${OP_NS}" logs "deployment/${deploy_name}" --tail=200 || true
+  echo "---- end rollout diagnostics ----"
+}
+
+wait_for_manager_rollout() {
+  local deploy_name="$1"
+  local timeout_seconds="$2"
+  local status_interval_seconds="$3"
+  local start_ts now elapsed last_status
+  start_ts="$(date +%s)"
+  last_status=0
+
+  while true; do
+    local desired updated ready available unavailable generation observed old
+    desired="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
+    updated="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.status.updatedReplicas}' 2>/dev/null || true)"
+    ready="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+    available="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+    unavailable="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.status.unavailableReplicas}' 2>/dev/null || true)"
+    generation="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.metadata.generation}' 2>/dev/null || true)"
+    observed="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)"
+
+    desired="$(to_int_or_zero "${desired}")"
+    updated="$(to_int_or_zero "${updated}")"
+    ready="$(to_int_or_zero "${ready}")"
+    available="$(to_int_or_zero "${available}")"
+    unavailable="$(to_int_or_zero "${unavailable}")"
+    generation="$(to_int_or_zero "${generation}")"
+    observed="$(to_int_or_zero "${observed}")"
+    old=$((desired - updated))
+    if (( old < 0 )); then
+      old=0
+    fi
+
+    if (( desired > 0 && observed >= generation && updated >= desired && available >= desired && ready >= desired && unavailable == 0 )); then
+      log "Manager rollout complete: desired=${desired} updated=${updated} ready=${ready} available=${available}"
+      return 0
+    fi
+
+    now="$(date +%s)"
+    elapsed=$((now - start_ts))
+    if (( now - last_status >= status_interval_seconds )); then
+      echo "rollout progress (${elapsed}s): desired=${desired} updated=${updated} old=${old} ready=${ready} available=${available} unavailable=${unavailable} observedGeneration=${observed}/${generation}"
+      kubectl -n "${OP_NS}" get rs -l control-plane=controller-manager -o wide --sort-by=.metadata.creationTimestamp || true
+      kubectl -n "${OP_NS}" get pods -l control-plane=controller-manager -o wide || true
+      last_status="${now}"
+    fi
+
+    if (( elapsed >= timeout_seconds )); then
+      dump_manager_rollout_diagnostics "${deploy_name}"
+      fail "timed out waiting for deployment/${deploy_name} rollout after ${timeout_seconds}s"
+    fi
+    sleep 5
+  done
+}
+
 log "Validating kubectl context"
 current_context="$(kubectl config current-context 2>/dev/null || true)"
 [[ -n "${current_context}" ]] || fail "kubectl current-context is empty"
@@ -179,27 +254,48 @@ kubectl apply -k config/default
 manager_deploy="$(kubectl -n "${OP_NS}" get deploy -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')"
 [[ -n "${manager_deploy}" ]] || fail "could not find controller-manager deployment in ${OP_NS}"
 
-kubectl -n "${OP_NS}" set image "deployment/${manager_deploy}" manager="${OPERATOR_IMAGE}"
-
-ensure_deploy_arg() {
+ensure_manager_deploy() {
   local deploy_name="$1"
-  local arg="$2"
-  local args_text
+  shift
+  local desired_args=("$@")
+  local args_text current_image patch_ops escaped
+  local missing_args=()
+
   args_text="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{range .spec.template.spec.containers[0].args[*]}{.}{"\n"}{end}')"
-  if ! grep -Fxq -- "${arg}" <<<"${args_text}"; then
-    local escaped_arg
-    escaped_arg="$(json_escape "${arg}")"
-    kubectl -n "${OP_NS}" patch "deployment/${deploy_name}" --type='json' \
-      -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"${escaped_arg}\"}]"
+  current_image="$(kubectl -n "${OP_NS}" get "deployment/${deploy_name}" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+
+  patch_ops=""
+  if [[ "${current_image}" != "${OPERATOR_IMAGE}" ]]; then
+    escaped="$(json_escape "${OPERATOR_IMAGE}")"
+    patch_ops+="{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/image\",\"value\":\"${escaped}\"}"
+  fi
+
+  for arg in "${desired_args[@]}"; do
+    if ! grep -Fxq -- "${arg}" <<<"${args_text}"; then
+      missing_args+=("${arg}")
+    fi
+  done
+
+  for arg in "${missing_args[@]}"; do
+    escaped="$(json_escape "${arg}")"
+    if [[ -n "${patch_ops}" ]]; then
+      patch_ops+=","
+    fi
+    patch_ops+="{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"${escaped}\"}"
+  done
+
+  if [[ -n "${patch_ops}" ]]; then
+    kubectl -n "${OP_NS}" patch "deployment/${deploy_name}" --type='json' -p="[${patch_ops}]"
   fi
 }
 
-ensure_deploy_arg "${manager_deploy}" "--metrics-bind-address=:8080"
-ensure_deploy_arg "${manager_deploy}" "--metrics-secure=false"
-ensure_deploy_arg "${manager_deploy}" "--prometheus-url=${PROM_URL}"
-ensure_deploy_arg "${manager_deploy}" "--debug=true"
+ensure_manager_deploy "${manager_deploy}" \
+  "--metrics-bind-address=:8080" \
+  "--metrics-secure=false" \
+  "--prometheus-url=${PROM_URL}" \
+  "--debug=true"
 
-kubectl -n "${OP_NS}" rollout status "deployment/${manager_deploy}" --timeout=10m
+wait_for_manager_rollout "${manager_deploy}" "${MANAGER_ROLLOUT_TIMEOUT_SECONDS}" "${ROLLOUT_STATUS_INTERVAL_SECONDS}"
 
 log "Creating PVC workload and CapacityPlan"
 kubectl apply -k "${CI_MANIFEST_DIR}/workloads"
