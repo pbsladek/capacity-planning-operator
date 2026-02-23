@@ -34,7 +34,7 @@ parse_extra_images() {
 
 discover_nodes() {
   k3d node list --no-headers \
-    | awk -v cluster="${CLUSTER_NAME}" '$1 ~ ("^k3d-" cluster "-") && $1 !~ /-tools$/ {print $1}'
+    | awk -v cluster="${CLUSTER_NAME}" '$1 ~ ("^k3d-" cluster "-(server|agent)") {print $1}'
 }
 
 candidate_image_refs() {
@@ -46,14 +46,33 @@ candidate_image_refs() {
   first="${img%%/*}"
   if [[ "${img}" != */* ]] || ([[ "${first}" != *.* ]] && [[ "${first}" != *:* ]] && [[ "${first}" != "localhost" ]]); then
     echo "docker.io/library/${img}"
+    echo "index.docker.io/library/${img}"
   fi
+}
+
+candidate_image_patterns() {
+  local img="$1"
+  local base="${img%%:*}"
+  local tag="${img##*:}"
+
+  # Exact image if no tag parsing happened.
+  if [[ "${base}" == "${img}" ]]; then
+    echo "${img}"
+    return
+  fi
+
+  echo "${base}:${tag}"
+  echo "docker.io/library/${base##*/}:${tag}"
+  echo "index.docker.io/library/${base##*/}:${tag}"
+  echo ".*/${base##*/}:${tag}$"
 }
 
 node_has_image() {
   local node="$1"
   local refs="$2"
+  local patterns="$3"
   local listed
-  listed="$(k3d node exec "${node}" -- ctr -n k8s.io images ls -q || true)"
+  listed="$(k3d node exec "${node}" -- sh -lc 'ctr -n k8s.io images ls -q 2>/dev/null || ctr images ls -q 2>/dev/null || true' || true)"
   [[ -n "${listed}" ]] || return 1
   while IFS= read -r ref; do
     [[ -n "${ref}" ]] || continue
@@ -61,13 +80,30 @@ node_has_image() {
       return 0
     fi
   done <<<"${refs}"
+  while IFS= read -r pat; do
+    [[ -n "${pat}" ]] || continue
+    if grep -Eq "${pat}" <<<"${listed}"; then
+      return 0
+    fi
+  done <<<"${patterns}"
   return 1
+}
+
+ensure_local_images_present() {
+  local image
+  for image in "${IMAGES_TO_IMPORT[@]}"; do
+    if docker image inspect "${image}" >/dev/null 2>&1; then
+      continue
+    fi
+    echo "Local image not found, pulling: ${image}"
+    docker pull "${image}"
+  done
 }
 
 check_image_on_all_nodes() {
   local missing=0
   local nodes=()
-  local image refs
+  local image refs patterns
 
   while IFS= read -r node; do
     [[ -n "${node}" ]] || continue
@@ -81,8 +117,9 @@ check_image_on_all_nodes() {
   echo "Verifying image on nodes: ${nodes[*]}"
   for image in "${IMAGES_TO_IMPORT[@]}"; do
     refs="$(candidate_image_refs "${image}")"
+    patterns="$(candidate_image_patterns "${image}")"
     for node in "${nodes[@]}"; do
-      if ! node_has_image "${node}" "${refs}"; then
+      if ! node_has_image "${node}" "${refs}" "${patterns}"; then
         echo "missing image on ${node}: ${image}" >&2
         missing=1
       fi
@@ -96,6 +133,8 @@ while IFS= read -r extra; do
   [[ -n "${extra}" ]] || continue
   IMAGES_TO_IMPORT+=("${extra}")
 done < <(parse_extra_images "${EXTRA_IMAGES}")
+
+ensure_local_images_present
 
 echo "Importing images into cluster ${CLUSTER_NAME}: ${IMAGES_TO_IMPORT[*]}"
 k3d image import "${IMAGES_TO_IMPORT[@]}" -c "${CLUSTER_NAME}" || true
