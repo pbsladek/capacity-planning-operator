@@ -34,37 +34,56 @@ parse_extra_images() {
 
 discover_nodes() {
   k3d node list --no-headers \
-    | awk -v cluster="${CLUSTER_NAME}" '$1 ~ ("^k3d-" cluster "-(server|agent)") {print $1}'
+    | awk -v cluster="${CLUSTER_NAME}" '$1 ~ ("^k3d-" cluster "-(server|agent)-[0-9]+$") {print $1}'
 }
 
 candidate_image_refs() {
   local img="$1"
   echo "${img}"
 
-  # If image does not include an explicit registry host, also match docker.io/library form.
+  # If image does not include an explicit registry host, also match common docker.io forms.
   local first
   first="${img%%/*}"
-  if [[ "${img}" != */* ]] || ([[ "${first}" != *.* ]] && [[ "${first}" != *:* ]] && [[ "${first}" != "localhost" ]]); then
+  if [[ "${img}" != */* ]]; then
     echo "docker.io/library/${img}"
     echo "index.docker.io/library/${img}"
+    return
+  fi
+
+  if [[ "${first}" != *.* ]] && [[ "${first}" != *:* ]] && [[ "${first}" != "localhost" ]]; then
+    echo "docker.io/${img}"
+    echo "index.docker.io/${img}"
   fi
 }
 
 candidate_image_patterns() {
   local img="$1"
-  local base="${img%%:*}"
-  local tag="${img##*:}"
+  local ref="${img%@*}"
+  local base tag last
+  last="${ref##*/}"
+  if [[ "${last}" == *:* ]]; then
+    base="${ref%:*}"
+    tag="${ref##*:}"
+  else
+    base="${ref}"
+    tag=""
+  fi
+  local name="${base##*/}"
 
   # Exact image if no tag parsing happened.
-  if [[ "${base}" == "${img}" ]]; then
+  if [[ -z "${tag}" ]]; then
     echo "${img}"
     return
   fi
 
   echo "${base}:${tag}"
-  echo "docker.io/library/${base##*/}:${tag}"
-  echo "index.docker.io/library/${base##*/}:${tag}"
-  echo ".*/${base##*/}:${tag}$"
+  echo "docker.io/${base}:${tag}"
+  echo "index.docker.io/${base}:${tag}"
+  if [[ "${base}" != */* ]]; then
+    echo "docker.io/library/${name}:${tag}"
+    echo "index.docker.io/library/${name}:${tag}"
+  fi
+  echo "(^|.*/)${name}:${tag}(@sha256:[a-f0-9]+)?$"
 }
 
 node_has_image() {
@@ -72,7 +91,7 @@ node_has_image() {
   local refs="$2"
   local patterns="$3"
   local listed
-  listed="$(k3d node exec "${node}" -- sh -lc 'ctr -n k8s.io images ls -q 2>/dev/null || ctr images ls -q 2>/dev/null || true' || true)"
+  listed="$(k3d node exec "${node}" -- sh -lc 'k3s ctr images ls -q 2>/dev/null || ctr -n k8s.io images ls -q 2>/dev/null || ctr images ls -q 2>/dev/null || true' || true)"
   [[ -n "${listed}" ]] || return 1
   while IFS= read -r ref; do
     [[ -n "${ref}" ]] || continue
