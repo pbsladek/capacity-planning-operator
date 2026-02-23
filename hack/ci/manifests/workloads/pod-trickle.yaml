@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpo-ci-trickle
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          # Slow trickle growth: 512Ki every 10s for ~6m (~16Mi).
+          for i in $(seq 1 32); do
+            dd if=/dev/zero of="/data/trickle-${i}.bin" bs=512K count=1 >/dev/null 2>&1
+            sync
+            sleep 10
+          done
+          sleep 120
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: cpo-ci-trickle-pvc

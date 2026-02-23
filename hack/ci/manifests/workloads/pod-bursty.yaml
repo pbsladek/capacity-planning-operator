@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpo-ci-bursty
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          # Bursty growth: repeated high-write bursts with short pauses (~72Mi total).
+          burst=0
+          while [ "${burst}" -lt 6 ]; do
+            burst=$((burst + 1))
+            for i in $(seq 1 6); do
+              dd if=/dev/zero of="/data/burst-${burst}-${i}.bin" bs=1M count=2 >/dev/null 2>&1
+              sync
+              sleep 2
+            done
+            sleep 25
+          done
+          sleep 120
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: cpo-ci-bursty-pvc

@@ -1,0 +1,41 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlan
+metadata:
+  name: __PLAN_NAME__
+spec:
+  namespaces:
+    - default
+  sampleRetention: __SAMPLE_RETENTION__
+  sampleInterval: "__SAMPLE_INTERVAL__"
+  reconcileInterval: "__RECONCILE_INTERVAL__"
+  prometheusURL: "__PROM_URL__"
+  thresholds:
+    usageRatio: "0.03"
+    daysUntilFull: 14
+  budgets:
+    namespaceBudgets:
+      - namespace: "default"
+        budget: "1600Mi"
+    workloadBudgets:
+      - namespace: "default"
+        kind: "Pod"
+        name: "cpo-ci-steady"
+        budget: "256Mi"
+      - namespace: "default"
+        kind: "Pod"
+        name: "cpo-ci-bursty"
+        budget: "256Mi"
+      - namespace: "default"
+        kind: "Pod"
+        name: "cpo-ci-trickle"
+        budget: "256Mi"
+      - namespace: "default"
+        kind: "Pod"
+        name: "cpo-ci-churn"
+        budget: "256Mi"
+      - namespace: "default"
+        kind: "Pod"
+        name: "cpo-ci-delayed"
+        budget: "256Mi"
+  llm:
+    provider: "disabled"

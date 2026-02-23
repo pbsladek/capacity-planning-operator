@@ -251,6 +251,12 @@ spec:
                   ReconcileInterval controls how often the CapacityPlan reconcile loop runs
                   to compute growth rates and update status. Defaults to 1 hour.
                 type: string
+              sampleInterval:
+                default: 30s
+                description: |-
+                  SampleInterval controls how often each PVC is sampled by the watcher.
+                  Defaults to 30 seconds.
+                type: string
               sampleRetention:
                 default: 720
                 description: |-

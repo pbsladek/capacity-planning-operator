@@ -247,6 +247,51 @@ make run
 
 If you run tests directly, ensure envtest binaries are available under `./bin/k8s` (the `make test` target handles setup).
 
+## CI Pipelines
+
+GitHub Actions workflow: `.github/workflows/ci.yaml`
+
+- `unit-tests` job runs `make test` on every push and pull request.
+
+Manual k3s integration workflow: `.github/workflows/k3s-integration.yaml`
+
+- Manual-dispatch only (expensive by design).
+- Boots a k3s cluster (via k3d), installs kube-prometheus-stack (Prometheus + Alertmanager), and deploys this operator image.
+- Creates 5 PVC-backed writer pods with distinct storage profiles:
+  - steady linear growth
+  - bursty growth
+  - slow trickle growth
+  - churn (write + periodic delete)
+  - delayed growth (late start)
+- Applies a CI `CapacityPlan`, observes growth for 20 minutes (configurable), and validates:
+  - status reconciliation and conditions
+  - generated `PrometheusRule` alerts
+  - exported budget/anomaly metrics
+  - Alertmanager readiness endpoint
+  - at least one capacity-planning alert present via Alertmanager API (`/api/v2/alerts`)
+
+Integration harness files:
+
+- `hack/ci/k3s_integration.sh`
+- `hack/ci/kube-prom-values.yaml`
+- `hack/ci/manifests/workloads/` (split PVC/pod manifests + kustomization)
+- `hack/ci/manifests/capacityplan.yaml.tmpl`
+
+Version pinning in workflows:
+
+- GitHub actions are pinned by commit SHA.
+- `k3d`, `k3s` image, `kubectl`, and `helm` are pinned to explicit versions in workflow env vars.
+- `kube-prometheus-stack` chart version is pinned via `KUBE_PROM_STACK_CHART_VERSION`.
+
+Nightly workflow: `.github/workflows/nightly-e2e.yaml`
+
+- Currently manual-dispatch only (scheduled trigger intentionally disabled).
+- Reuses k3s integration setup with Alertmanager webhook routing override.
+- Deploys a lightweight in-cluster receiver and validates actual alert delivery path from Alertmanager.
+- Uses:
+  - `hack/ci/nightly_alert_delivery.sh`
+  - `hack/ci/kube-prom-values-alerting.yaml`
+
 ## Build and Deploy
 
 1. Build/push image:
@@ -320,4 +365,4 @@ High-impact next steps for this operator:
 
 ## License
 
-Apache-2.0
+MIT

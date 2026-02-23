@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cpo-ci-churn
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: writer
+      image: busybox:1.36
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          # Churn pattern: alternating writes with periodic cleanup (~20Mi net).
+          for i in $(seq 1 40); do
+            dd if=/dev/zero of="/data/churn-${i}.bin" bs=1M count=1 >/dev/null 2>&1
+            sync
+            if [ $((i % 4)) -eq 0 ]; then
+              rm -f /data/churn-$((i-3)).bin /data/churn-$((i-2)).bin 2>/dev/null || true
+              sync
+            fi
+            sleep 8
+          done
+          sleep 120
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: cpo-ci-churn-pvc

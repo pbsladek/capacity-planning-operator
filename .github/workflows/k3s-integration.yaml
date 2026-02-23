@@ -1,0 +1,94 @@
+name: K3s Integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k3s-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  k3s-integration:
+    name: K3s Integration (Prometheus + Alertmanager)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CLUSTER_NAME: cpo-ci
+      OPERATOR_IMAGE: capacity-planning-operator:ci
+      K3D_VERSION: v5.7.5
+      K3S_IMAGE: rancher/k3s:v1.32.2-k3s1
+      KUBECTL_VERSION: v1.32.2
+      HELM_VERSION: v3.16.4
+      KUBE_PROM_STACK_CHART_VERSION: 65.8.1
+      TREND_OBSERVE_SECONDS: "480"
+      PLAN_SAMPLE_INTERVAL: 5s
+      PLAN_RECONCILE_INTERVAL: 15s
+      PLAN_SAMPLE_RETENTION: "32"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+
+      - name: Setup Go
+        uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install kubectl (pinned)
+        run: |
+          mkdir -p "${HOME}/bin"
+          curl -fsSL -o "${HOME}/bin/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x "${HOME}/bin/kubectl"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          kubectl version --client
+
+      - name: Install Helm (pinned)
+        run: |
+          mkdir -p "${HOME}/bin"
+          curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/helm.tar.gz -C /tmp
+          install -m 0755 /tmp/linux-amd64/helm "${HOME}/bin/helm"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          helm version --short
+
+      - name: Install k3d (pinned)
+        run: |
+          mkdir -p "${HOME}/bin"
+          curl -fsSL -o "${HOME}/bin/k3d" "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          chmod +x "${HOME}/bin/k3d"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          k3d version
+
+      - name: Create k3s Cluster
+        run: |
+          k3d cluster create "${CLUSTER_NAME}" --agents 1 --image "${K3S_IMAGE}" --wait
+          kubectl cluster-info
+
+      - name: Build Operator Image
+        run: docker build -t "${OPERATOR_IMAGE}" .
+
+      - name: Import Image into k3s
+        run: k3d image import "${OPERATOR_IMAGE}" -c "${CLUSTER_NAME}"
+
+      - name: Run K3s Integration Checks
+        env:
+          EXPECTED_KUBE_CONTEXT: k3d-${{ env.CLUSTER_NAME }}
+        run: bash hack/ci/k3s_integration.sh
+
+      - name: Dump Diagnostics on Failure
+        if: ${{ failure() }}
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl -n k8s-operator-system get deploy,po,svc || true
+          kubectl -n monitoring get deploy,po,svc,sts || true
+          kubectl get capacityplans.capacityplanning.pbsladek.io -A || true
+          kubectl get capacityplan ci-plan -o yaml || true
+          kubectl -n k8s-operator-system logs deploy/k8s-operator-controller-manager --tail=400 || true
+          kubectl -n monitoring logs deploy/kube-prometheus-stack-operator --tail=400 || true
+          [ -f /tmp/prometheus-port-forward.log ] && cat /tmp/prometheus-port-forward.log || true
+          [ -f /tmp/alertmanager-port-forward.log ] && cat /tmp/alertmanager-port-forward.log || true
+          [ -f /tmp/manager-port-forward.log ] && cat /tmp/manager-port-forward.log || true

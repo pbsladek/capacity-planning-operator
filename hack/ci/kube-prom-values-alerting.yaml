@@ -1,0 +1,15 @@
+alertmanager:
+  config:
+    global: {}
+    route:
+      receiver: ci-webhook
+      group_by:
+        - alertname
+      group_wait: 5s
+      group_interval: 15s
+      repeat_interval: 1h
+    receivers:
+      - name: ci-webhook
+        webhook_configs:
+          - url: http://alert-receiver.monitoring.svc.cluster.local:8080/
+            send_resolved: true

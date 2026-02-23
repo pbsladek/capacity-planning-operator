@@ -1,17 +1,7 @@
 /*
 Copyright 2024 pbsladek.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: MIT
 */
 
 package v1
@@ -41,6 +31,12 @@ type CapacityPlanSpec struct {
 	// +optional
 	// +kubebuilder:default="1h"
 	ReconcileInterval metav1.Duration `json:"reconcileInterval,omitempty"`
+
+	// SampleInterval controls how often each PVC is sampled by the watcher.
+	// Defaults to 30 seconds.
+	// +optional
+	// +kubebuilder:default="30s"
+	SampleInterval metav1.Duration `json:"sampleInterval,omitempty"`
 
 	// PrometheusURL is the base URL of the Prometheus instance used to query
 	// kubelet_volume_stats_used_bytes (e.g. "http://prometheus:9090").

@@ -1,0 +1,91 @@
+name: Nightly Alerting E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  alerting-e2e:
+    name: K3s Nightly (Alert Delivery Path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      CLUSTER_NAME: cpo-nightly
+      OPERATOR_IMAGE: capacity-planning-operator:nightly
+      KUBE_PROM_VALUES_EXTRA_FILE: hack/ci/kube-prom-values-alerting.yaml
+      K3D_VERSION: v5.7.5
+      K3S_IMAGE: rancher/k3s:v1.32.2-k3s1
+      KUBECTL_VERSION: v1.32.2
+      HELM_VERSION: v3.16.4
+      KUBE_PROM_STACK_CHART_VERSION: 65.8.1
+      TREND_OBSERVE_SECONDS: "480"
+      PLAN_SAMPLE_INTERVAL: 5s
+      PLAN_RECONCILE_INTERVAL: 15s
+      PLAN_SAMPLE_RETENTION: "32"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+
+      - name: Setup Go
+        uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install kubectl (pinned)
+        run: |
+          mkdir -p "${HOME}/bin"
+          curl -fsSL -o "${HOME}/bin/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x "${HOME}/bin/kubectl"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          kubectl version --client
+
+      - name: Install Helm (pinned)
+        run: |
+          mkdir -p "${HOME}/bin"
+          curl -fsSL -o /tmp/helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/helm.tar.gz -C /tmp
+          install -m 0755 /tmp/linux-amd64/helm "${HOME}/bin/helm"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          helm version --short
+
+      - name: Install k3d (pinned)
+        run: |
+          mkdir -p "${HOME}/bin"
+          curl -fsSL -o "${HOME}/bin/k3d" "https://github.com/k3d-io/k3d/releases/download/${K3D_VERSION}/k3d-linux-amd64"
+          chmod +x "${HOME}/bin/k3d"
+          echo "${HOME}/bin" >> "${GITHUB_PATH}"
+          k3d version
+
+      - name: Create k3s Cluster
+        run: |
+          k3d cluster create "${CLUSTER_NAME}" --agents 1 --image "${K3S_IMAGE}" --wait
+          kubectl cluster-info
+
+      - name: Build Operator Image
+        run: docker build -t "${OPERATOR_IMAGE}" .
+
+      - name: Import Image into k3s
+        run: k3d image import "${OPERATOR_IMAGE}" -c "${CLUSTER_NAME}"
+
+      - name: Run Core K3s Integration
+        run: bash hack/ci/k3s_integration.sh
+
+      - name: Run Alert Delivery Validation
+        run: bash hack/ci/nightly_alert_delivery.sh
+
+      - name: Dump Diagnostics on Failure
+        if: failure()
+        run: |
+          kubectl get nodes -o wide || true
+          kubectl get pods -A -o wide || true
+          kubectl -n k8s-operator-system get deploy,po,svc || true
+          kubectl -n monitoring get deploy,po,svc,sts,prometheusrule || true
+          kubectl -n monitoring logs deploy/alert-receiver --tail=400 || true
+          kubectl -n k8s-operator-system logs deploy/k8s-operator-controller-manager --tail=500 || true

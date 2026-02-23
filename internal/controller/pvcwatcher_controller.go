@@ -1,17 +1,7 @@
 /*
 Copyright 2024 pbsladek.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+SPDX-License-Identifier: MIT
 */
 
 package controller
@@ -35,6 +25,8 @@ import (
 	opmetrics "github.com/pbsladek/capacity-planning-operator/internal/operator"
 )
 
+const defaultPVCWatcherSampleInterval = 30 * time.Second
+
 // PVCState holds per-PVC in-memory state: the ring buffer of usage samples
 // and the last known UID (to detect PVC deletion/recreation).
 type PVCState struct {
@@ -51,10 +43,11 @@ type PVCState struct {
 type PVCWatcherReconciler struct {
 	client.Client
 
-	mu            sync.RWMutex
-	metricsClient metrics.PVCMetricsClient
-	pvcStates     map[string]*PVCState // key: "namespace/name"
-	retention     int                  // ring buffer capacity (samples)
+	mu             sync.RWMutex
+	metricsClient  metrics.PVCMetricsClient
+	pvcStates      map[string]*PVCState // key: "namespace/name"
+	retention      int                  // ring buffer capacity (samples)
+	sampleInterval time.Duration
 }
 
 // NewPVCWatcherReconciler creates a reconciler with the given ring-buffer capacity.
@@ -64,10 +57,11 @@ func NewPVCWatcherReconciler(c client.Client, mc metrics.PVCMetricsClient, capac
 		capacity = 720
 	}
 	return &PVCWatcherReconciler{
-		Client:        c,
-		metricsClient: mc,
-		pvcStates:     make(map[string]*PVCState),
-		retention:     capacity,
+		Client:         c,
+		metricsClient:  mc,
+		pvcStates:      make(map[string]*PVCState),
+		retention:      capacity,
+		sampleInterval: defaultPVCWatcherSampleInterval,
 	}
 }
 
@@ -137,7 +131,7 @@ func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		"samplesCount", state.Buffer.Len(),
 	)
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: r.getSampleInterval()}, nil
 }
 
 // SetupWithManager registers the reconciler with the controller-runtime manager.
@@ -272,9 +266,12 @@ func (r *PVCWatcherReconciler) ensureState(key string, uid types.UID) *PVCState 
 
 // Configure updates the watcher's active metrics client and ring-buffer
 // retention. Existing buffers are resized to honor the new retention.
-func (r *PVCWatcherReconciler) Configure(mc metrics.PVCMetricsClient, retention int) {
+func (r *PVCWatcherReconciler) Configure(mc metrics.PVCMetricsClient, retention int, sampleInterval time.Duration) {
 	if retention < 1 {
 		retention = 720
+	}
+	if sampleInterval <= 0 {
+		sampleInterval = defaultPVCWatcherSampleInterval
 	}
 
 	r.mu.Lock()
@@ -283,6 +280,7 @@ func (r *PVCWatcherReconciler) Configure(mc metrics.PVCMetricsClient, retention 
 	if mc != nil {
 		r.metricsClient = mc
 	}
+	r.sampleInterval = sampleInterval
 	if retention == r.retention {
 		return
 	}
@@ -299,6 +297,15 @@ func (r *PVCWatcherReconciler) Configure(mc metrics.PVCMetricsClient, retention 
 		}
 		state.Buffer = resized
 	}
+}
+
+func (r *PVCWatcherReconciler) getSampleInterval() time.Duration {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.sampleInterval <= 0 {
+		return defaultPVCWatcherSampleInterval
+	}
+	return r.sampleInterval
 }
 
 func (r *PVCWatcherReconciler) getMetricsClient() metrics.PVCMetricsClient {
