@@ -6,7 +6,7 @@ A Kubernetes operator that tracks PersistentVolumeClaim (PVC) usage trends and s
 - Prometheus metrics exposed by the operator
 - optional `PrometheusRule` alert generation
 - optional Grafana dashboard ConfigMap generation
-- per-PVC natural language insights (currently via a stub LLM client)
+- per-PVC natural language insights via configurable providers (OpenAI, Anthropic, FastAPI)
 
 This project is built with Kubebuilder/controller-runtime.
 
@@ -56,6 +56,10 @@ CRD type definitions live in `api/v1/capacityplan_types.go`.
   - Alert threshold in days (default `7`).
 - `llmInsightsInterval duration`
   - Minimum time between LLM refreshes per PVC (default `6h`).
+- `llm`
+  - LLM provider config (`disabled|openai|anthropic|fastapi`), model, timeout/maxTokens/temperature.
+  - OpenAI/Anthropic use Secret refs for API keys.
+  - FastAPI supports in-cluster URL and optional bearer-token Secret.
 - `grafanaDashboardNamespace string`
   - Namespace where dashboard ConfigMap is written.
 
@@ -115,7 +119,12 @@ This supports Grafana sidecar-based dashboard auto-discovery.
 
 LLM integration is abstracted by `internal/llm.InsightGenerator`.
 
-Current wiring in `cmd/main.go` uses `StubInsightGenerator`, which returns deterministic placeholder text and performs no external API calls. Rate-limiting is enforced in `CapacityPlanReconciler` via `status.lastLLMTime` and `spec.llmInsightsInterval`.
+`CapacityPlanReconciler` resolves provider config from `spec.llm` and instantiates the selected backend (`openai`, `anthropic`, or `fastapi`). Rate-limiting is enforced via `status.lastLLMTime` and `spec.llmInsightsInterval`.
+
+Provider auth details:
+- `openai`: secret in operator namespace (`spec.llm.openai.secretRefName`, key default `apiKey`)
+- `anthropic`: secret in operator namespace (`spec.llm.anthropic.secretRefName`, key default `apiKey`)
+- `fastapi`: optional bearer token secret (`spec.llm.fastapi.authSecretRefName`, key default `token`)
 
 ## Repository Layout
 
@@ -124,13 +133,13 @@ Current wiring in `cmd/main.go` uses `StubInsightGenerator`, which returns deter
 - `internal/controller/`: reconcilers and envtest suite
 - `internal/analysis/`: ring buffer + OLS growth logic
 - `internal/metrics/`: metrics backend interface + Prometheus client
-- `internal/llm/`: LLM interface + stub/mock clients
+- `internal/llm/`: LLM interface, provider factory, OpenAI/Anthropic/FastAPI clients, stub/mock clients
 - `internal/operator/`: Prometheus metric registration
 - `config/`: kustomize, CRDs, RBAC, manager manifests
 
 ## Prerequisites
 
-- Go `1.23+`
+- Go `1.26+`
 - Docker (for image build/push)
 - Access to a Kubernetes cluster + `kubectl`
 
@@ -191,6 +200,11 @@ Inspect status:
 kubectl get capacityplan cluster -o yaml
 ```
 
+Provider-specific examples:
+- OpenAI: `config/samples/secret_openai_api_key.yaml`, `config/samples/capacityplanning_v1_capacityplan_openai.yaml`
+- Anthropic: `config/samples/secret_anthropic_api_key.yaml`, `config/samples/capacityplanning_v1_capacityplan_anthropic.yaml`
+- FastAPI (in-cluster): `config/samples/secret_fastapi_bearer_token.yaml`, `config/samples/capacityplanning_v1_capacityplan_fastapi.yaml`
+
 ## Codebase Review Notes (Current State)
 
 These are the main operational caveats to keep in mind:
@@ -211,7 +225,7 @@ High-impact next steps for this operator:
 
 1. Define and enforce a strict policy for multiple `CapacityPlan` objects (currently last-reconciled plan wins for watcher config).
 2. Add startup backfill invocation for tracked PVCs.
-3. Replace stub LLM client with a real implementation (with retries, timeouts, and circuit breaking).
+3. Add provider client caching and retry/backoff policy tuning for large clusters.
 4. Remove legacy `Sample` API/controller scaffold.
 
 ## License

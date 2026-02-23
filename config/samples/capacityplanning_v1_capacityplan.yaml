@@ -27,6 +27,41 @@ spec:
   # How often to refresh LLM capacity planning insights per PVC.
   llmInsightsInterval: "6h"
 
+  # LLM insight provider configuration.
+  llm:
+    # disabled | openai | anthropic | fastapi
+    provider: "disabled"
+    # Optional model identifier (provider-specific).
+    model: ""
+    # Request timeout and max output tokens.
+    timeout: "15s"
+    maxTokens: 256
+    # Optional sampling temperature.
+    # temperature: 0.2
+
+    # OpenAI provider configuration.
+    openai:
+      # Secret in operator namespace with key `apiKey`.
+      secretRefName: ""
+      secretKey: "apiKey"
+      # Optional custom endpoint for compatible gateways.
+      baseURL: ""
+
+    # Anthropic provider configuration.
+    anthropic:
+      secretRefName: ""
+      secretKey: "apiKey"
+      baseURL: ""
+
+    # In-cluster FastAPI model service.
+    fastapi:
+      # Example: http://llm-api.ml.svc.cluster.local:8000/v1/insights
+      url: ""
+      # Optional bearer token secret.
+      authSecretRefName: ""
+      authSecretKey: "token"
+      tlsSkipVerify: false
+
   # Namespace where the Grafana dashboard ConfigMap is created.
   # Defaults to "default" if not set.
   grafanaDashboardNamespace: "monitoring"

@@ -60,6 +60,98 @@ spec:
                   GrafanaDashboardNamespace is the namespace where the Grafana dashboard
                   ConfigMap is created. Defaults to the operator's own namespace.
                 type: string
+              llm:
+                description: |-
+                  LLM configures how insights are generated (provider/model/credentials).
+                  When provider is "disabled" (default), no new LLM insights are generated.
+                properties:
+                  anthropic:
+                    description: Anthropic provider settings.
+                    properties:
+                      baseURL:
+                        description: BaseURL overrides the Anthropic API base URL.
+                        type: string
+                      secretKey:
+                        default: apiKey
+                        description: SecretKey is the data key inside SecretRefName.
+                          Defaults to "apiKey".
+                        type: string
+                      secretRefName:
+                        description: SecretRefName is the Secret name (in operator
+                          namespace) holding API key.
+                        type: string
+                    type: object
+                  fastapi:
+                    description: FastAPI provider settings.
+                    properties:
+                      authSecretKey:
+                        default: token
+                        description: AuthSecretKey is the token key in AuthSecretRefName.
+                          Defaults to "token".
+                        type: string
+                      authSecretRefName:
+                        description: |-
+                          AuthSecretRefName is an optional Secret name (operator namespace)
+                          containing a bearer token for FastAPI requests.
+                        type: string
+                      tlsSkipVerify:
+                        description: |-
+                          TLSSkipVerify disables TLS cert verification for FastAPI HTTPS endpoint.
+                          Prefer false in production. Defaults to false.
+                        type: boolean
+                      url:
+                        description: |-
+                          URL is the FastAPI endpoint for insight generation.
+                          Example: http://llm-api.ml.svc.cluster.local:8000/v1/insights
+                        type: string
+                    type: object
+                  maxTokens:
+                    default: 256
+                    description: MaxTokens limits response size. Defaults to 256.
+                    maximum: 8192
+                    minimum: 1
+                    type: integer
+                  model:
+                    description: Model is the model identifier used by OpenAI/Anthropic/FastAPI
+                      backends.
+                    type: string
+                  openai:
+                    description: OpenAI provider settings.
+                    properties:
+                      baseURL:
+                        description: BaseURL overrides the OpenAI API base URL.
+                        type: string
+                      secretKey:
+                        default: apiKey
+                        description: SecretKey is the data key inside SecretRefName.
+                          Defaults to "apiKey".
+                        type: string
+                      secretRefName:
+                        description: SecretRefName is the Secret name (in operator
+                          namespace) holding API key.
+                        type: string
+                    type: object
+                  provider:
+                    default: disabled
+                    description: Provider selects the backend implementation.
+                    enum:
+                    - disabled
+                    - openai
+                    - anthropic
+                    - fastapi
+                    type: string
+                  temperature:
+                    description: Temperature controls sampling randomness. Nil uses
+                      provider defaults.
+                    maximum: 2
+                    minimum: 0
+                    type: number
+                  timeout:
+                    default: 15s
+                    description: Timeout controls request timeout for LLM calls. Defaults
+                      to 15s.
+                    type: string
+                type: object
               llmInsightsInterval:
                 default: 6h
                 description: |-

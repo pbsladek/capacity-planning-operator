@@ -59,10 +59,113 @@ type CapacityPlanSpec struct {
 	// +kubebuilder:default="6h"
 	LLMInsightsInterval metav1.Duration `json:"llmInsightsInterval,omitempty"`
 
+	// LLM configures how insights are generated (provider/model/credentials).
+	// When provider is "disabled" (default), no new LLM insights are generated.
+	// +optional
+	LLM LLMProviderSpec `json:"llm,omitempty"`
+
 	// GrafanaDashboardNamespace is the namespace where the Grafana dashboard
 	// ConfigMap is created. Defaults to the operator's own namespace.
 	// +optional
 	GrafanaDashboardNamespace string `json:"grafanaDashboardNamespace,omitempty"`
+}
+
+// LLMProviderSpec configures the insight generation backend.
+type LLMProviderSpec struct {
+	// Provider selects the backend implementation.
+	// +optional
+	// +kubebuilder:default="disabled"
+	// +kubebuilder:validation:Enum=disabled;openai;anthropic;fastapi
+	Provider string `json:"provider,omitempty"`
+
+	// Model is the model identifier used by OpenAI/Anthropic/FastAPI backends.
+	// +optional
+	Model string `json:"model,omitempty"`
+
+	// Timeout controls request timeout for LLM calls. Defaults to 15s.
+	// +optional
+	// +kubebuilder:default="15s"
+	Timeout metav1.Duration `json:"timeout,omitempty"`
+
+	// MaxTokens limits response size. Defaults to 256.
+	// +optional
+	// +kubebuilder:default=256
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8192
+	MaxTokens int `json:"maxTokens,omitempty"`
+
+	// Temperature controls sampling randomness. Nil uses provider defaults.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=2
+	Temperature *float64 `json:"temperature,omitempty"`
+
+	// OpenAI provider settings.
+	// +optional
+	OpenAI OpenAIProviderSpec `json:"openai,omitempty"`
+
+	// Anthropic provider settings.
+	// +optional
+	Anthropic AnthropicProviderSpec `json:"anthropic,omitempty"`
+
+	// FastAPI provider settings.
+	// +optional
+	FastAPI FastAPIProviderSpec `json:"fastapi,omitempty"`
+}
+
+// OpenAIProviderSpec contains OpenAI backend settings.
+type OpenAIProviderSpec struct {
+	// SecretRefName is the Secret name (in operator namespace) holding API key.
+	// +optional
+	SecretRefName string `json:"secretRefName,omitempty"`
+
+	// SecretKey is the data key inside SecretRefName. Defaults to "apiKey".
+	// +optional
+	// +kubebuilder:default="apiKey"
+	SecretKey string `json:"secretKey,omitempty"`
+
+	// BaseURL overrides the OpenAI API base URL.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+}
+
+// AnthropicProviderSpec contains Anthropic backend settings.
+type AnthropicProviderSpec struct {
+	// SecretRefName is the Secret name (in operator namespace) holding API key.
+	// +optional
+	SecretRefName string `json:"secretRefName,omitempty"`
+
+	// SecretKey is the data key inside SecretRefName. Defaults to "apiKey".
+	// +optional
+	// +kubebuilder:default="apiKey"
+	SecretKey string `json:"secretKey,omitempty"`
+
+	// BaseURL overrides the Anthropic API base URL.
+	// +optional
+	BaseURL string `json:"baseURL,omitempty"`
+}
+
+// FastAPIProviderSpec contains in-cluster FastAPI backend settings.
+type FastAPIProviderSpec struct {
+	// URL is the FastAPI endpoint for insight generation.
+	// Example: http://llm-api.ml.svc.cluster.local:8000/v1/insights
+	// +optional
+	URL string `json:"url,omitempty"`
+
+	// AuthSecretRefName is an optional Secret name (operator namespace)
+	// containing a bearer token for FastAPI requests.
+	// +optional
+	AuthSecretRefName string `json:"authSecretRefName,omitempty"`
+
+	// AuthSecretKey is the token key in AuthSecretRefName. Defaults to "token".
+	// +optional
+	// +kubebuilder:default="token"
+	AuthSecretKey string `json:"authSecretKey,omitempty"`
+
+	// TLSSkipVerify disables TLS cert verification for FastAPI HTTPS endpoint.
+	// Prefer false in production. Defaults to false.
+	// +optional
+	TLSSkipVerify bool `json:"tlsSkipVerify,omitempty"`
 }
 
 // ThresholdSpec defines usage thresholds that trigger alert conditions.

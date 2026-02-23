@@ -1,0 +1,30 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlan
+metadata:
+  name: cluster-openai
+spec:
+  namespaces: []
+  sampleRetention: 720
+  reconcileInterval: "1h"
+  prometheusURL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+
+  thresholds:
+    usageRatio: "0.85"
+    daysUntilFull: 7
+
+  llmInsightsInterval: "6h"
+  llm:
+    provider: "openai"
+    # Choose the model you want to use.
+    model: "gpt-4.1-mini"
+    timeout: "15s"
+    maxTokens: 256
+    # temperature: 0.2
+    openai:
+      # Secret must live in operator namespace (default: k8s-operator-system).
+      secretRefName: "capacityplan-openai-api"
+      secretKey: "apiKey"
+      # Optional: use a compatible in-cluster gateway/proxy.
+      # baseURL: "http://openai-proxy.default.svc.cluster.local:8080/v1"
+
+  grafanaDashboardNamespace: "monitoring"

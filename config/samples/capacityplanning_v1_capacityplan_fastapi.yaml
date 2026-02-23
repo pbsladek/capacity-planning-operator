@@ -1,0 +1,30 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlan
+metadata:
+  name: cluster-fastapi
+spec:
+  namespaces: []
+  sampleRetention: 720
+  reconcileInterval: "1h"
+  prometheusURL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+
+  thresholds:
+    usageRatio: "0.85"
+    daysUntilFull: 7
+
+  llmInsightsInterval: "6h"
+  llm:
+    provider: "fastapi"
+    # Optional provider-level model hint passed to your FastAPI service.
+    model: "local-capacity-model-v1"
+    timeout: "15s"
+    maxTokens: 256
+    fastapi:
+      # In-cluster service URL keeps traffic local.
+      url: "http://llm-api.ml.svc.cluster.local:8000/v1/insights"
+      # Optional bearer token secret.
+      authSecretRefName: "capacityplan-fastapi-auth"
+      authSecretKey: "token"
+      tlsSkipVerify: false
+
+  grafanaDashboardNamespace: "monitoring"

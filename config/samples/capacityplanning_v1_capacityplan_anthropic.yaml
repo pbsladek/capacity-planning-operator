@@ -1,0 +1,30 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlan
+metadata:
+  name: cluster-anthropic
+spec:
+  namespaces: []
+  sampleRetention: 720
+  reconcileInterval: "1h"
+  prometheusURL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+
+  thresholds:
+    usageRatio: "0.85"
+    daysUntilFull: 7
+
+  llmInsightsInterval: "6h"
+  llm:
+    provider: "anthropic"
+    # Choose the model you want to use.
+    model: "claude-3-5-haiku-latest"
+    timeout: "15s"
+    maxTokens: 256
+    # temperature: 0.2
+    anthropic:
+      # Secret must live in operator namespace (default: k8s-operator-system).
+      secretRefName: "capacityplan-anthropic-api"
+      secretKey: "apiKey"
+      # Optional: use a compatible in-cluster gateway/proxy.
+      # baseURL: "http://anthropic-proxy.default.svc.cluster.local:8080"
+
+  grafanaDashboardNamespace: "monitoring"

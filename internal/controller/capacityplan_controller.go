@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -114,13 +115,21 @@ func (r *CapacityPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if llmInterval <= 0 {
 		llmInterval = 6 * time.Hour
 	}
+	activeLLM := r.LLMClient
+	if activeLLM == nil {
+		activeLLM, err = r.resolvePlanLLMClient(ctx, &plan)
+		if err != nil {
+			logger.Error(err, "failed to configure LLM provider; insights disabled for this reconcile")
+			activeLLM = nil
+		}
+	}
 
 	// Build new summaries.
 	summaries := make([]capacityv1.PVCSummary, 0, len(pvcs))
 	for i := range pvcs {
 		pvc := &pvcs[i]
 		key := pvc.Namespace + "/" + pvc.Name
-		summary := r.buildSummary(ctx, pvc, key, usageThreshold, daysThreshold, llmInterval, prevByKey[key])
+		summary := r.buildSummary(ctx, pvc, key, usageThreshold, daysThreshold, llmInterval, activeLLM, prevByKey[key])
 		summaries = append(summaries, summary)
 	}
 
@@ -179,6 +188,7 @@ func (r *CapacityPlanReconciler) buildSummary(
 	usageThreshold float64,
 	daysThreshold float64,
 	llmInterval time.Duration,
+	llmClient llm.InsightGenerator,
 	prev capacityv1.PVCSummary,
 ) capacityv1.PVCSummary {
 	logger := log.FromContext(ctx)
@@ -221,10 +231,10 @@ func (r *CapacityPlanReconciler) buildSummary(
 	// LLM insight — preserve previous unless rate-limit window has elapsed.
 	insight := prev.LLMInsight
 	lastLLMTime := prev.LastLLMTime
-	if r.LLMClient != nil {
+	if llmClient != nil {
 		needsRefresh := lastLLMTime == nil || time.Since(lastLLMTime.Time) >= llmInterval
 		if needsRefresh {
-			newInsight, err := r.LLMClient.GenerateInsight(ctx, llm.PVCContext{
+			newInsight, err := llmClient.GenerateInsight(ctx, llm.PVCContext{
 				Namespace:     pvc.Namespace,
 				Name:          pvc.Name,
 				Growth:        growth,
@@ -354,6 +364,121 @@ func (r *CapacityPlanReconciler) configureWatcherForPlan(spec capacityv1.Capacit
 	}
 
 	r.Watcher.Configure(mc, retention)
+}
+
+func (r *CapacityPlanReconciler) resolvePlanLLMClient(ctx context.Context, plan *capacityv1.CapacityPlan) (llm.InsightGenerator, error) {
+	cfg, err := r.buildLLMProviderConfig(ctx, plan.Spec.LLM)
+	if err != nil {
+		return nil, err
+	}
+	return llm.NewInsightGenerator(cfg)
+}
+
+func (r *CapacityPlanReconciler) buildLLMProviderConfig(ctx context.Context, spec capacityv1.LLMProviderSpec) (llm.ProviderConfig, error) {
+	provider := strings.TrimSpace(spec.Provider)
+	if provider == "" {
+		provider = llm.ProviderDisabled
+	}
+
+	timeout := spec.Timeout.Duration
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	maxTokens := spec.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 256
+	}
+
+	cfg := llm.ProviderConfig{
+		Provider:    provider,
+		Model:       strings.TrimSpace(spec.Model),
+		Timeout:     timeout,
+		MaxTokens:   maxTokens,
+		Temperature: spec.Temperature,
+	}
+
+	switch provider {
+	case llm.ProviderDisabled:
+		return cfg, nil
+	case llm.ProviderOpenAI:
+		apiKey, err := r.readSecretValue(ctx, spec.OpenAI.SecretRefName, defaultSecretKey(spec.OpenAI.SecretKey, "apiKey"))
+		if err != nil {
+			return llm.ProviderConfig{}, err
+		}
+		cfg.OpenAI = llm.OpenAIConfig{
+			APIKey:  apiKey,
+			BaseURL: strings.TrimSpace(spec.OpenAI.BaseURL),
+		}
+	case llm.ProviderAnthropic:
+		apiKey, err := r.readSecretValue(ctx, spec.Anthropic.SecretRefName, defaultSecretKey(spec.Anthropic.SecretKey, "apiKey"))
+		if err != nil {
+			return llm.ProviderConfig{}, err
+		}
+		cfg.Anthropic = llm.AnthropicConfig{
+			APIKey:  apiKey,
+			BaseURL: strings.TrimSpace(spec.Anthropic.BaseURL),
+		}
+	case llm.ProviderFastAPI:
+		authToken := ""
+		if strings.TrimSpace(spec.FastAPI.AuthSecretRefName) != "" {
+			token, err := r.readSecretValue(ctx, spec.FastAPI.AuthSecretRefName, defaultSecretKey(spec.FastAPI.AuthSecretKey, "token"))
+			if err != nil {
+				return llm.ProviderConfig{}, err
+			}
+			authToken = token
+		}
+		cfg.FastAPI = llm.FastAPIConfig{
+			URL:           strings.TrimSpace(spec.FastAPI.URL),
+			AuthToken:     authToken,
+			TLSSkipVerify: spec.FastAPI.TLSSkipVerify,
+		}
+	default:
+		return llm.ProviderConfig{}, fmt.Errorf("unsupported llm provider %q", provider)
+	}
+
+	return cfg, nil
+}
+
+func (r *CapacityPlanReconciler) readSecretValue(ctx context.Context, name, key string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("secret name is required")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", fmt.Errorf("secret key is required for secret %q", name)
+	}
+
+	ns := r.OperatorNamespace
+	if ns == "" {
+		ns = os.Getenv("POD_NAMESPACE")
+	}
+	if ns == "" {
+		ns = "default"
+	}
+
+	var sec corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &sec); err != nil {
+		return "", fmt.Errorf("getting secret %s/%s: %w", ns, name, err)
+	}
+
+	val, ok := sec.Data[key]
+	if !ok {
+		return "", fmt.Errorf("secret %s/%s missing key %q", ns, name, key)
+	}
+	str := strings.TrimSpace(string(val))
+	if str == "" {
+		return "", fmt.Errorf("secret %s/%s key %q is empty", ns, name, key)
+	}
+	return str, nil
+}
+
+func defaultSecretKey(v string, fallback string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 // SetupWithManager registers the reconciler and detects optional Prometheus

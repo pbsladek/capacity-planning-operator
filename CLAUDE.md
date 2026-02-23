@@ -7,7 +7,7 @@ with Alertmanager (PrometheusRule) and Grafana, and generates LLM-backed capacit
 ## Module & Layout
 
 - **Module**: `github.com/pbsladek/capacity-planning-operator`
-- **Go version**: 1.23 (in go.mod; machine may have a newer version installed)
+- **Go version**: 1.26 (in go.mod; machine may have a newer version installed)
 - **Framework**: controller-runtime v0.20.4 / kubebuilder v4 layout
 - **Entry point**: `cmd/main.go`
 - **Controllers**: `internal/controller/`
@@ -48,7 +48,7 @@ are **never** written to etcd — only computed summaries (~1KB/PVC) go into `Ca
 |---------|---------|
 | `internal/analysis` | `RingBuffer` (thread-safe circular buffer) + `CalculateGrowth` (OLS regression) |
 | `internal/metrics` | `PVCMetricsClient` interface, Prometheus HTTP client, mock |
-| `internal/llm` | `InsightGenerator` interface, `StubInsightGenerator`, `MockInsightGenerator` |
+| `internal/llm` | `InsightGenerator` interface, provider factory (`openai`/`anthropic`/`fastapi`), stub + mock |
 | `internal/operator` | Registers 6 Prometheus GaugeVecs in `init()` via controller-runtime registry |
 | `internal/controller` | `PVCWatcherReconciler`, `CapacityPlanReconciler`, envtest suite |
 

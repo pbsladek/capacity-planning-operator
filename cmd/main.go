@@ -37,7 +37,6 @@ import (
 
 	capacityv1 "github.com/pbsladek/capacity-planning-operator/api/v1"
 	"github.com/pbsladek/capacity-planning-operator/internal/controller"
-	"github.com/pbsladek/capacity-planning-operator/internal/llm"
 	"github.com/pbsladek/capacity-planning-operator/internal/metrics"
 	_ "github.com/pbsladek/capacity-planning-operator/internal/operator" // registers Prometheus metrics in init()
 )
@@ -143,13 +142,11 @@ func main() {
 		operatorNamespace = "default"
 	}
 
-	// Wire CapacityPlanReconciler. Real LLM integration is a future addition;
-	// for now the stub returns formatted placeholder text.
+	// Wire CapacityPlanReconciler. LLM provider is selected from CapacityPlan spec.
 	if err = (&controller.CapacityPlanReconciler{
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
 		Watcher:              pvcWatcher,
-		LLMClient:            &llm.StubInsightGenerator{},
 		DefaultMetricsClient: metricsClient,
 		DefaultRetention:     defaultSampleRetention,
 		OperatorNamespace:    operatorNamespace,
