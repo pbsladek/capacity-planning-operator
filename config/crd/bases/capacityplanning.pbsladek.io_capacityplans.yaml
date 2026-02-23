@@ -1,0 +1,270 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: capacityplans.capacityplanning.pbsladek.io
+spec:
+  group: capacityplanning.pbsladek.io
+  names:
+    kind: CapacityPlan
+    listKind: CapacityPlanList
+    plural: capacityplans
+    shortNames:
+    - cp
+    singular: capacityplan
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.reconcileInterval
+      name: Interval
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.lastReconcileTime
+      name: Last Reconcile
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          CapacityPlan is the cluster-scoped configuration object for the capacity planning operator.
+          It controls which namespaces and resource types are watched, how data is retained,
+          and where alerts and dashboards are published.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: CapacityPlanSpec defines the desired configuration for the
+              capacity planning operator.
+            properties:
+              grafanaDashboardNamespace:
+                description: |-
+                  GrafanaDashboardNamespace is the namespace where the Grafana dashboard
+                  ConfigMap is created. Defaults to the operator's own namespace.
+                type: string
+              llmInsightsInterval:
+                default: 6h
+                description: |-
+                  LLMInsightsInterval controls how often LLM insights are regenerated per PVC.
+                  LLM calls are rate-limited by this interval; the reconciler skips calling
+                  the LLM if the last insight is newer than this duration. Defaults to 6 hours.
+                type: string
+              namespaces:
+                description: |-
+                  Namespaces is the list of namespaces to watch for PVCs.
+                  An empty list means watch all namespaces.
+                items:
+                  type: string
+                type: array
+              prometheusURL:
+                description: |-
+                  PrometheusURL is the base URL of the Prometheus instance used to query
+                  kubelet_volume_stats_used_bytes (e.g. "http://prometheus:9090").
+                  If empty, PVC usage metrics are not collected.
+                type: string
+              reconcileInterval:
+                default: 1h
+                description: |-
+                  ReconcileInterval controls how often the CapacityPlan reconcile loop runs
+                  to compute growth rates and update status. Defaults to 1 hour.
+                type: string
+              sampleRetention:
+                default: 720
+                description: |-
+                  SampleRetention is the maximum number of samples to keep per PVC in the
+                  in-memory ring buffer. At a 5-minute scrape interval, 720 samples covers 60 hours.
+                  Defaults to 720.
+                maximum: 8760
+                minimum: 1
+                type: integer
+              thresholds:
+                description: Thresholds defines when alert conditions are triggered.
+                properties:
+                  daysUntilFull:
+                    default: 7
+                    description: |-
+                      DaysUntilFull triggers an alert when the predicted days until full falls
+                      below this value. Set to 0 to disable this check. Default 7.
+                    minimum: 0
+                    type: integer
+                  usageRatio:
+                    default: "0.85"
+                    description: |-
+                      UsageRatio is the used/capacity ratio (0.0-1.0) at which an alert fires.
+                      Stored as a string to avoid float JSON serialization issues. Default "0.85".
+                    pattern: ^(0(\.\d+)?|1(\.0+)?)$
+                    type: string
+                type: object
+            type: object
+          status:
+            description: CapacityPlanStatus defines the observed state of CapacityPlan.
+            properties:
+              conditions:
+                description: Conditions hold the latest available observations of
+                  the CapacityPlan's state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              lastReconcileTime:
+                description: LastReconcileTime is when the CapacityPlan controller
+                  last ran successfully.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the generation of the CapacityPlan
+                  spec that produced this status.
+                format: int64
+                type: integer
+              pvcs:
+                description: PVCs holds per-PVC summaries for all tracked PersistentVolumeClaims.
+                items:
+                  description: |-
+                    PVCSummary holds the latest computed state for a single PVC.
+                    Raw samples are never written to etcd — they live exclusively in the
+                    in-memory ring buffer inside PVCWatcherReconciler.
+                  properties:
+                    alertFiring:
+                      description: AlertFiring is true when this PVC has crossed a
+                        configured alert threshold.
+                      type: boolean
+                    capacityBytes:
+                      description: CapacityBytes is the total allocated storage in
+                        bytes, from pvc.spec.resources.requests.storage.
+                      format: int64
+                      type: integer
+                    confidenceR2:
+                      description: |-
+                        ConfidenceR2 is the R-squared coefficient of determination for the growth
+                        regression (0.0-1.0). Values below 0.5 indicate an unreliable trend.
+                      type: number
+                    daysUntilFull:
+                      description: |-
+                        DaysUntilFull is the predicted number of days until the PVC reaches 100% capacity.
+                        Nil if growth rate is <= 0 (shrinking or flat) or capacity is unknown.
+                      type: number
+                    growthBytesPerDay:
+                      description: |-
+                        GrowthBytesPerDay is the OLS linear regression slope over the sample window,
+                        in bytes per day. Negative means the volume is shrinking.
+                      type: number
+                    lastLLMTime:
+                      description: LastLLMTime is when the LLMInsight was last generated.
+                      format: date-time
+                      type: string
+                    lastSampleTime:
+                      description: LastSampleTime is when the most recent sample was
+                        recorded.
+                      format: date-time
+                      type: string
+                    llmInsight:
+                      description: |-
+                        LLMInsight is the most recent LLM-generated analysis for this PVC.
+                        Empty if LLM is not configured or has not run yet.
+                      type: string
+                    name:
+                      description: Name is the name of the PVC.
+                      type: string
+                    namespace:
+                      description: Namespace is the namespace of the PVC.
+                      type: string
+                    samplesCount:
+                      description: SamplesCount is the number of samples currently
+                        held in the ring buffer for this PVC.
+                      type: integer
+                    usageRatio:
+                      description: UsageRatio is UsedBytes/CapacityBytes as a float
+                        in [0.0, 1.0].
+                      type: number
+                    usedBytes:
+                      description: UsedBytes is the most recently observed used storage
+                        in bytes.
+                      format: int64
+                      type: integer
+                  required:
+                  - alertFiring
+                  - capacityBytes
+                  - confidenceR2
+                  - growthBytesPerDay
+                  - name
+                  - namespace
+                  - samplesCount
+                  - usageRatio
+                  - usedBytes
+                  type: object
+                type: array
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

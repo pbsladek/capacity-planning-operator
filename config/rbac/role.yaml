@@ -1,0 +1,98 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+- apiGroups:
+  - capacityplanning.pbsladek.io
+  resources:
+  - capacityplans
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - capacityplanning.pbsladek.io
+  resources:
+  - capacityplans/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - capacityplanning.pbsladek.io
+  resources:
+  - capacityplans/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - monitoring.coreos.com
+  resources:
+  - prometheusrules
+  - servicemonitors
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - tutorial.example.com
+  resources:
+  - samples
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - tutorial.example.com
+  resources:
+  - samples/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - tutorial.example.com
+  resources:
+  - samples/status
+  verbs:
+  - get
+  - patch
+  - update

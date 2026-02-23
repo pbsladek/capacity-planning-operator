@@ -1,0 +1,32 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlan
+metadata:
+  name: cluster
+spec:
+  # Watch all namespaces. Restrict with:
+  #   namespaces: ["default", "production"]
+  namespaces: []
+
+  # Keep 720 hourly samples per PVC (30 days at 1h scrape interval).
+  sampleRetention: 720
+
+  # How often the CapacityPlan reconciler runs to compute growth and update status.
+  reconcileInterval: "1h"
+
+  # Base URL of the Prometheus instance that exposes kubelet_volume_stats_* metrics.
+  # Required for live usage collection; leave empty to disable Prometheus scraping.
+  prometheusURL: "http://prometheus-operated.monitoring.svc.cluster.local:9090"
+
+  # Alert thresholds.
+  thresholds:
+    # Fire when used/capacity >= 85%.
+    usageRatio: "0.85"
+    # Fire when predicted time to full < 7 days.
+    daysUntilFull: 7
+
+  # How often to refresh LLM capacity planning insights per PVC.
+  llmInsightsInterval: "6h"
+
+  # Namespace where the Grafana dashboard ConfigMap is created.
+  # Defaults to "default" if not set.
+  grafanaDashboardNamespace: "monitoring"
