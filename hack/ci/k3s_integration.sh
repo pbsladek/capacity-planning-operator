@@ -14,9 +14,16 @@ KUBE_PROM_STACK_CHART_VERSION="${KUBE_PROM_STACK_CHART_VERSION:-65.8.1}"
 CI_MANIFEST_DIR="${CI_MANIFEST_DIR:-hack/ci/manifests}"
 TREND_OBSERVE_SECONDS="${TREND_OBSERVE_SECONDS:-480}"
 USAGE_SNAPSHOT_INTERVAL_SECONDS="${USAGE_SNAPSHOT_INTERVAL_SECONDS:-180}"
+MIN_TREND_OBSERVE_SECONDS="${MIN_TREND_OBSERVE_SECONDS:-240}"
+MIN_TREND_SNAPSHOTS="${MIN_TREND_SNAPSHOTS:-2}"
 USAGE_RATIO_SANITY_MAX="${USAGE_RATIO_SANITY_MAX:-0}"
 MIN_GROWTH_BYTES_PER_MIN="${MIN_GROWTH_BYTES_PER_MIN:-1024}"
 MIN_GROWING_PVCS="${MIN_GROWING_PVCS:-3}"
+GROWTH_COMPARE_WINDOW_SECONDS="${GROWTH_COMPARE_WINDOW_SECONDS:-240}"
+GROWTH_COMPARE_REL_TOL="${GROWTH_COMPARE_REL_TOL:-0.65}"
+GROWTH_COMPARE_ABS_TOL_BYTES_PER_DAY="${GROWTH_COMPARE_ABS_TOL_BYTES_PER_DAY:-15000000000}"
+MIN_GROWTH_COMPARABLE_PVCS="${MIN_GROWTH_COMPARABLE_PVCS:-4}"
+MIN_GROWTH_MATCHING_PVCS="${MIN_GROWTH_MATCHING_PVCS:-4}"
 PLAN_SAMPLE_RETENTION="${PLAN_SAMPLE_RETENTION:-24}"
 PLAN_SAMPLE_INTERVAL="${PLAN_SAMPLE_INTERVAL:-5s}"
 PLAN_RECONCILE_INTERVAL="${PLAN_RECONCILE_INTERVAL:-15s}"
@@ -27,6 +34,7 @@ ALERT_PROPAGATION_TIMEOUT_SECONDS="${ALERT_PROPAGATION_TIMEOUT_SECONDS:-900}"
 MANAGER_ENDPOINT_READY_TIMEOUT_SECONDS="${MANAGER_ENDPOINT_READY_TIMEOUT_SECONDS:-180}"
 MANAGER_ROLLOUT_TIMEOUT_SECONDS="${MANAGER_ROLLOUT_TIMEOUT_SECONDS:-420}"
 ROLLOUT_STATUS_INTERVAL_SECONDS="${ROLLOUT_STATUS_INTERVAL_SECONDS:-15}"
+CI_WORKLOADS=(cpo-ci-steady cpo-ci-bursty cpo-ci-trickle cpo-ci-churn cpo-ci-delayed)
 
 fail() {
   echo "ERROR: $*" >&2
@@ -58,6 +66,47 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+format_duration() {
+  local secs="${1:-0}"
+  if (( secs < 60 )); then
+    printf '%ss' "${secs}"
+    return
+  fi
+  printf '%sm%02ds' "$((secs / 60))" "$((secs % 60))"
+}
+
+print_validation_report() {
+  local total_secs obs_secs
+  total_secs=$(( "$(date +%s)" - RUN_STARTED_AT ))
+  obs_secs=$(( OBS_FINISHED_AT - OBS_STARTED_AT ))
+  echo
+  echo "Validation report"
+  echo "  context: ${CHECK_CONTEXT}"
+  echo "  prometheus_endpoint: ${CHECK_PROM_ENDPOINT}"
+  echo "  manager_rollout: ${CHECK_MANAGER_ROLLOUT}"
+  echo "  plan_reconcile: ${CHECK_PLAN_RECONCILE}"
+  echo "  trend_signal: ${CHECK_TREND_SIGNAL} (snapshots=${OBS_SNAPSHOTS}, peakGrowingPVCs=${OBS_MAX_GROWING_PVCS})"
+  echo "  growth_math_crosscheck: ${CHECK_GROWTH_COMPARE}"
+  echo "  prom_rule_content: ${CHECK_PROM_RULE}"
+  echo "  manager_metrics: ${CHECK_MANAGER_METRICS}"
+  echo "  prometheus_capacity_alerts: ${CHECK_PROM_ALERTS}"
+  echo "  workload_budget_alerts: ${CHECK_WORKLOAD_ALERTS}"
+  echo "  alertmanager_capacity_alerts: ${CHECK_ALERTMANAGER_ALERTS}"
+  echo "  timings: trend=$(format_duration "${obs_secs}") total=$(format_duration "${total_secs}")"
+}
+
+float_abs() {
+  awk -v x="${1:-0}" 'BEGIN { if (x < 0) x = -x; printf "%.12g", x }'
+}
+
+seconds_to_prom_duration() {
+  local seconds="${1:-0}"
+  if (( seconds < 1 )); then
+    seconds=1
+  fi
+  printf '%ss' "${seconds}"
+}
 
 wait_until() {
   local description="$1"
@@ -131,9 +180,19 @@ prometheus_has_workload_budget_alert() {
   ! grep -Eq '"result":[[:space:]]*\[[[:space:]]*\]' <<<"${out}"
 }
 
+prometheus_has_all_workload_budget_alerts() {
+  local workload
+  for workload in "${CI_WORKLOADS[@]}"; do
+    if ! prometheus_has_workload_budget_alert "${workload}"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 manager_metrics_have_capacity_series() {
   local out
-  out="$(curl -fsS --max-time 5 http://127.0.0.1:18080/metrics || true)"
+  out="$(curl -fsS --max-time 5 http://127.0.0.1:18080/metrics 2>/dev/null || true)"
   [[ -n "${out}" ]] || return 1
   grep -q "^capacityplan_namespace_budget_days_to_breach" <<<"${out}" || return 1
   grep -q "^capacityplan_workload_budget_days_to_breach" <<<"${out}" || return 1
@@ -148,6 +207,53 @@ prometheus_instant_scalar() {
   val="$(printf '%s' "${out}" | sed -n 's/.*"value":[[][^,]*,"\([^"]*\)"[]].*/\1/p' | head -n1)"
   [[ -n "${val}" ]] || return 1
   printf '%s' "${val}"
+}
+
+compare_growth_calculations() {
+  local rows duration matched comparable
+  local name status_growth raw_growth abs_diff scale allowed rel_diff_pct
+
+  rows="$(kubectl get capacityplan "${PLAN_NAME}" \
+    -o jsonpath='{range .status.pvcs[*]}{.name}{"\t"}{.growthBytesPerDay}{"\n"}{end}' 2>/dev/null || true)"
+  [[ -n "${rows}" ]] || fail "cannot cross-check growth math: status.pvcs is empty"
+
+  duration="$(seconds_to_prom_duration "${GROWTH_COMPARE_WINDOW_SECONDS}")"
+  matched=0
+  comparable=0
+
+  echo "Growth math cross-check (status vs Prometheus deriv over ${duration})"
+  echo "  pvc statusBytesPerDay promDerivBytesPerDay absDiff relDiffPct match"
+  while IFS=$'\t' read -r name status_growth; do
+    [[ -n "${name}" ]] || continue
+    [[ "${status_growth:-}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]] || continue
+
+    raw_growth="$(prometheus_instant_scalar "deriv(max(kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"${name}\"})[${duration}]) * 86400" || true)"
+    if [[ ! "${raw_growth:-}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
+      echo "  ${name} ${status_growth} n/a n/a n/a no-data"
+      continue
+    fi
+
+    comparable=$((comparable + 1))
+    abs_diff="$(awk -v a="${status_growth}" -v b="${raw_growth}" 'BEGIN { d=a-b; if (d < 0) d=-d; printf "%.12g", d }')"
+    scale="$(awk -v a="${status_growth}" -v b="${raw_growth}" 'BEGIN { aa=(a<0?-a:a); bb=(b<0?-b:b); s=(aa>bb?aa:bb); if (s < 1) s=1; printf "%.12g", s }')"
+    allowed="$(awk -v abs_tol="${GROWTH_COMPARE_ABS_TOL_BYTES_PER_DAY}" -v rel_tol="${GROWTH_COMPARE_REL_TOL}" -v s="${scale}" 'BEGIN { r=rel_tol*s; if (r > abs_tol) printf "%.12g", r; else printf "%.12g", abs_tol }')"
+    rel_diff_pct="$(awk -v d="${abs_diff}" -v s="${scale}" 'BEGIN { printf "%.2f", (d/s)*100 }')"
+
+    if awk -v d="${abs_diff}" -v a="${allowed}" 'BEGIN { exit !(d <= a) }'; then
+      matched=$((matched + 1))
+      echo "  ${name} ${status_growth} ${raw_growth} ${abs_diff} ${rel_diff_pct} yes"
+    else
+      echo "  ${name} ${status_growth} ${raw_growth} ${abs_diff} ${rel_diff_pct} no"
+    fi
+  done <<<"${rows}"
+
+  if (( comparable < MIN_GROWTH_COMPARABLE_PVCS )); then
+    fail "growth cross-check had only ${comparable} comparable PVCs (required: ${MIN_GROWTH_COMPARABLE_PVCS})"
+  fi
+  if (( matched < MIN_GROWTH_MATCHING_PVCS )); then
+    fail "growth cross-check matched ${matched}/${comparable} PVCs (required matches: ${MIN_GROWTH_MATCHING_PVCS})"
+  fi
+  CHECK_GROWTH_COMPARE="pass (${matched}/${comparable} matched)"
 }
 
 print_capacityplan_usage_snapshot() {
@@ -367,10 +473,29 @@ wait_for_manager_rollout() {
   done
 }
 
+RUN_STARTED_AT="$(date +%s)"
+OBS_STARTED_AT="${RUN_STARTED_AT}"
+OBS_FINISHED_AT="${RUN_STARTED_AT}"
+OBS_SNAPSHOTS=0
+OBS_MAX_GROWING_PVCS=0
+
+CHECK_CONTEXT="pending"
+CHECK_PROM_ENDPOINT="pending"
+CHECK_MANAGER_ROLLOUT="pending"
+CHECK_PLAN_RECONCILE="pending"
+CHECK_TREND_SIGNAL="pending"
+CHECK_PROM_RULE="pending"
+CHECK_MANAGER_METRICS="pending"
+CHECK_PROM_ALERTS="pending"
+CHECK_WORKLOAD_ALERTS="pending"
+CHECK_ALERTMANAGER_ALERTS="pending"
+CHECK_GROWTH_COMPARE="pending"
+
 log "Validating kubectl context"
 current_context="$(kubectl config current-context 2>/dev/null || true)"
 [[ -n "${current_context}" ]] || fail "kubectl current-context is empty"
 [[ "${current_context}" == "${EXPECTED_KUBE_CONTEXT}" ]] || fail "kubectl context mismatch: expected ${EXPECTED_KUBE_CONTEXT}, got ${current_context}"
+CHECK_CONTEXT="pass (${current_context})"
 
 log "Installing kube-prometheus-stack"
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts >/dev/null
@@ -405,6 +530,7 @@ wait_until "Prometheus readiness endpoint" "${PROM_ENDPOINT_READY_TIMEOUT_SECOND
   http_ok "http://127.0.0.1:19090/-/ready"
 wait_until "Prometheus API query endpoint" "${PROM_ENDPOINT_READY_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
   prometheus_api_ready
+CHECK_PROM_ENDPOINT="pass"
 
 log "Deploying operator manifests"
 kubectl apply -k config/default
@@ -455,11 +581,12 @@ ensure_manager_deploy "${manager_deploy}" \
   "--debug=true"
 
 wait_for_manager_rollout "${manager_deploy}" "${MANAGER_ROLLOUT_TIMEOUT_SECONDS}" "${ROLLOUT_STATUS_INTERVAL_SECONDS}"
+CHECK_MANAGER_ROLLOUT="pass"
 
 log "Creating PVC workload and CapacityPlan"
 kubectl apply -k "${CI_MANIFEST_DIR}/workloads"
 
-for pod in cpo-ci-steady cpo-ci-bursty cpo-ci-trickle cpo-ci-churn cpo-ci-delayed; do
+for pod in "${CI_WORKLOADS[@]}"; do
   kubectl -n default wait --for=condition=PodScheduled "pod/${pod}" --timeout=3m
 done
 for pvc in cpo-ci-steady-pvc cpo-ci-bursty-pvc cpo-ci-trickle-pvc cpo-ci-churn-pvc cpo-ci-delayed-pvc; do
@@ -490,12 +617,15 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 [[ -n "${last_reconcile}" ]] || fail "CapacityPlan status.lastReconcileTime was not populated in time"
+CHECK_PLAN_RECONCILE="pass"
 
 log "Observing storage trends for ${TREND_OBSERVE_SECONDS}s"
+OBS_STARTED_AT="$(date +%s)"
 remaining="${TREND_OBSERVE_SECONDS}"
 saw_nonzero_usage=0
 saw_capacity_alerts=0
 max_growing_pvcs=0
+snapshots_collected=0
 while (( remaining > 0 )); do
   interval="${USAGE_SNAPSHOT_INTERVAL_SECONDS}"
   if (( interval <= 0 )); then
@@ -506,6 +636,7 @@ while (( remaining > 0 )); do
   fi
   sleep "${interval}"
   remaining=$((remaining - interval))
+  snapshots_collected=$((snapshots_collected + 1))
   print_capacityplan_usage_snapshot
   print_growth_per_min_summary
   print_prometheus_pvc_raw_snapshot
@@ -524,6 +655,15 @@ while (( remaining > 0 )); do
     kubectl get capacityplan "${PLAN_NAME}" -o yaml || true
     fail "capacity plan usage ratio exceeded sanity limit (${USAGE_RATIO_SANITY_MAX}); metrics source likely incorrect"
   fi
+  obs_elapsed=$(( "$(date +%s)" - OBS_STARTED_AT ))
+  if (( remaining > 0 &&
+        snapshots_collected >= MIN_TREND_SNAPSHOTS &&
+        obs_elapsed >= MIN_TREND_OBSERVE_SECONDS &&
+        saw_nonzero_usage == 1 &&
+        max_growing_pvcs >= MIN_GROWING_PVCS )); then
+    echo "  earlyStop=true reason=trend-signals-confirmed elapsed=${obs_elapsed}s snapshots=${snapshots_collected}"
+    break
+  fi
 done
 
 if (( saw_nonzero_usage == 0 )); then
@@ -534,6 +674,13 @@ if (( max_growing_pvcs < MIN_GROWING_PVCS )); then
   kubectl get capacityplan "${PLAN_NAME}" -o yaml || true
   fail "peak growing PVC count was ${max_growing_pvcs}; required at least ${MIN_GROWING_PVCS} PVCs above ${MIN_GROWTH_BYTES_PER_MIN} bytes/min during observation"
 fi
+OBS_FINISHED_AT="$(date +%s)"
+OBS_SNAPSHOTS="${snapshots_collected}"
+OBS_MAX_GROWING_PVCS="${max_growing_pvcs}"
+CHECK_TREND_SIGNAL="pass (nonzeroUsage=${saw_nonzero_usage}, peakGrowingPVCs=${max_growing_pvcs})"
+
+log "Cross-checking growth calculations against Prometheus deriv()"
+compare_growth_calculations
 
 last_reconcile_post="$(kubectl get capacityplan "${PLAN_NAME}" -o jsonpath='{.status.lastReconcileTime}' 2>/dev/null || true)"
 [[ -n "${last_reconcile_post}" ]] || fail "CapacityPlan did not continue reconciling during trend observation"
@@ -570,6 +717,7 @@ grep -q "alert: PVCGrowthAccelerationSpike" /tmp/capacityplan-prometheusrule.yam
 grep -q "alert: PVCTrendInstability" /tmp/capacityplan-prometheusrule.yaml || fail "missing PVCTrendInstability alert"
 grep -q "alert: NamespaceBudgetBreachSoon" /tmp/capacityplan-prometheusrule.yaml || fail "missing NamespaceBudgetBreachSoon alert"
 grep -q "alert: WorkloadBudgetBreachSoon" /tmp/capacityplan-prometheusrule.yaml || fail "missing WorkloadBudgetBreachSoon alert"
+CHECK_PROM_RULE="pass"
 
 log "Checking operator metrics for new budget/anomaly metrics"
 manager_pod="$(kubectl -n "${OP_NS}" get pod -l control-plane=controller-manager -o jsonpath='{.items[0].metadata.name}')"
@@ -580,6 +728,7 @@ wait_until "operator metrics port-forward process" "${MANAGER_ENDPOINT_READY_TIM
   port_forward_running "${MANAGER_PF_PID}"
 wait_until "operator metrics endpoint capacity series" "${MANAGER_ENDPOINT_READY_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
   manager_metrics_have_capacity_series
+CHECK_MANAGER_METRICS="pass"
 
 log "Checking Alertmanager readiness endpoint"
 kubectl -n "${MON_NS}" port-forward svc/kube-prometheus-stack-alertmanager 19093:9093 >/tmp/alertmanager-port-forward.log 2>&1 &
@@ -595,16 +744,23 @@ log "Verifying capacity alerts in Prometheus rule evaluation first"
 if (( saw_capacity_alerts == 0 )); then
   wait_until "capacity alerts in Prometheus ALERTS metric" "${ALERT_PROPAGATION_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
     prometheus_has_capacity_alerts
+  CHECK_PROM_ALERTS="pass (after wait)"
+else
+  CHECK_PROM_ALERTS="pass (seen during trend observation)"
 fi
 
-log "Verifying workload budget alerts for each CI workload"
-for workload in cpo-ci-steady cpo-ci-bursty cpo-ci-trickle cpo-ci-churn cpo-ci-delayed; do
-  wait_until "WorkloadBudgetBreachSoon for ${workload}" "${ALERT_PROPAGATION_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
-    prometheus_has_workload_budget_alert "${workload}"
+log "Verifying workload budget alerts for all CI workloads"
+wait_until "WorkloadBudgetBreachSoon alerts for all workloads" "${ALERT_PROPAGATION_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
+  prometheus_has_all_workload_budget_alerts
+for workload in "${CI_WORKLOADS[@]}"; do
+  prometheus_has_workload_budget_alert "${workload}" || fail "missing WorkloadBudgetBreachSoon for ${workload} after aggregate wait"
 done
+CHECK_WORKLOAD_ALERTS="pass (${#CI_WORKLOADS[@]} workloads)"
 
 log "Verifying capacity alerts reached Alertmanager API"
 wait_until "capacity alerts in Alertmanager API" "${ALERT_PROPAGATION_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
   alertmanager_has_capacity_alerts
+CHECK_ALERTMANAGER_ALERTS="pass"
 
+print_validation_report
 log "K3s integration checks passed"

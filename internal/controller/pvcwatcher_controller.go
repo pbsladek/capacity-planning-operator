@@ -30,8 +30,9 @@ const defaultPVCWatcherSampleInterval = 30 * time.Second
 // PVCState holds per-PVC in-memory state: the ring buffer of usage samples
 // and the last known UID (to detect PVC deletion/recreation).
 type PVCState struct {
-	Buffer  *analysis.RingBuffer
-	LastUID types.UID
+	Buffer            *analysis.RingBuffer
+	LastUID           types.UID
+	LastCapacityBytes int64
 }
 
 // PVCWatcherReconciler watches PersistentVolumeClaims across all namespaces,
@@ -120,6 +121,7 @@ func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	opmetrics.PVCUsageBytes.WithLabelValues(labels...).Set(float64(usage.UsedBytes))
 	opmetrics.PVCCapacityBytes.WithLabelValues(labels...).Set(float64(capacityBytes))
 	opmetrics.PVCSamplesCount.WithLabelValues(labels...).Set(float64(state.Buffer.Len()))
+	state.LastCapacityBytes = capacityBytes
 
 	if capacityBytes > 0 {
 		ratio := float64(usage.UsedBytes) / float64(capacityBytes)
@@ -153,6 +155,21 @@ func (r *PVCWatcherReconciler) GetSnapshot(key string) []analysis.Sample {
 		return nil
 	}
 	return state.Buffer.Snapshot()
+}
+
+// GetLatestCapacity returns the latest known capacity bytes for the PVC key.
+// The bool return indicates whether a positive capacity value is available.
+func (r *PVCWatcherReconciler) GetLatestCapacity(key string) (int64, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	state, ok := r.pvcStates[key]
+	if !ok {
+		return 0, false
+	}
+	if state.LastCapacityBytes <= 0 {
+		return 0, false
+	}
+	return state.LastCapacityBytes, true
 }
 
 // BackfillFromRange populates the ring buffer for a PVC with historical data

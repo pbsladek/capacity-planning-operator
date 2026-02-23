@@ -42,12 +42,40 @@ Stabilize k3s integration/nightly alerting CI so capacity alerts are reliably ev
      - `.github/workflows/nightly-e2e.yaml`
    - Collector includes `summary.txt` with likely-cause hints.
 
+7. Integration output now includes a clean pass report and faster trend observation behavior.
+   - `hack/ci/k3s_integration.sh` adds:
+     - final `Validation report` block with explicit pass statuses
+     - early trend-observation stop when enough snapshots and growth signal are already confirmed
+     - aggregate wait for all workload budget alerts instead of sequential timeout windows
+   - New knobs:
+     - `MIN_TREND_OBSERVE_SECONDS` (default `240`)
+     - `MIN_TREND_SNAPSHOTS` (default `2`)
+   - Workflow defaults reduced:
+     - `TREND_OBSERVE_SECONDS=360`
+     - `ALERT_PROPAGATION_TIMEOUT_SECONDS=600`
+
+8. Capacity source in status calculations fixed.
+   - `internal/controller/pvcwatcher_controller.go` stores last observed capacity per PVC in watcher state.
+   - `internal/controller/capacityplan_controller.go` now prefers watcher-observed capacity when computing `usageRatio` and forecasts.
+   - This aligns `CapacityPlan.status` ratios with Prometheus raw metrics instead of PVC request-size-only fallbacks.
+
+9. Added growth-math verification gate in integration.
+   - `hack/ci/k3s_integration.sh` now cross-checks `status.growthBytesPerDay` against an independent Prometheus `deriv(...) * 86400` calculation per PVC.
+   - Configurable tolerances and minimum match thresholds:
+     - `GROWTH_COMPARE_WINDOW_SECONDS`
+     - `GROWTH_COMPARE_REL_TOL`
+     - `GROWTH_COMPARE_ABS_TOL_BYTES_PER_DAY`
+     - `MIN_GROWTH_COMPARABLE_PVCS`
+     - `MIN_GROWTH_MATCHING_PVCS`
+   - Result is included in final `Validation report` as `growth_math_crosscheck`.
+
 ## Validation Run
 
 1. `bash -n hack/ci/k3s_integration.sh` passed.
 2. `bash -n hack/ci/collect_diagnostics.sh` passed.
 3. `go test ./internal/controller -run 'TestBuildPrometheusRuleUnstructured' -count=1` passed.
-4. Full `go test ./...` may fail locally without envtest binaries (`etcd`) configured.
+4. `go test ./internal/controller -run 'TestBuildPrometheusRuleUnstructured|TestBuildSummary|TestPVCWatcher' -count=1` passed.
+5. Full `go test ./...` may fail locally without envtest binaries (`etcd`) configured.
 
 ## Open Items / Next Actions
 

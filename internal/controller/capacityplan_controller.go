@@ -344,7 +344,9 @@ func (r *CapacityPlanReconciler) buildSummary(
 
 	// Capacity from PVC spec.
 	var capacityBytes int64
-	if qty, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+	if capFromWatcher, ok := r.Watcher.GetLatestCapacity(key); ok {
+		capacityBytes = capFromWatcher
+	} else if qty, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
 		capacityBytes = qty.Value()
 	}
 
