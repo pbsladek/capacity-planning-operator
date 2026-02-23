@@ -13,6 +13,7 @@ KUBE_PROM_VALUES_EXTRA_FILE="${KUBE_PROM_VALUES_EXTRA_FILE:-}"
 KUBE_PROM_STACK_CHART_VERSION="${KUBE_PROM_STACK_CHART_VERSION:-65.8.1}"
 CI_MANIFEST_DIR="${CI_MANIFEST_DIR:-hack/ci/manifests}"
 TREND_OBSERVE_SECONDS="${TREND_OBSERVE_SECONDS:-480}"
+USAGE_SNAPSHOT_INTERVAL_SECONDS="${USAGE_SNAPSHOT_INTERVAL_SECONDS:-180}"
 PLAN_SAMPLE_RETENTION="${PLAN_SAMPLE_RETENTION:-24}"
 PLAN_SAMPLE_INTERVAL="${PLAN_SAMPLE_INTERVAL:-5s}"
 PLAN_RECONCILE_INTERVAL="${PLAN_RECONCILE_INTERVAL:-15s}"
@@ -134,6 +135,37 @@ manager_metrics_have_capacity_series() {
   grep -q "^capacityplan_namespace_budget_days_to_breach" <<<"${out}" || return 1
   grep -q "^capacityplan_workload_budget_days_to_breach" <<<"${out}" || return 1
   grep -q "^capacityplan_pvc_anomaly" <<<"${out}" || return 1
+}
+
+print_capacityplan_usage_snapshot() {
+  local now rows
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo "[$now] CapacityPlan PVC snapshot (${PLAN_NAME})"
+  rows="$(kubectl get capacityplan "${PLAN_NAME}" \
+    -o jsonpath='{range .status.pvcs[*]}{.name}{"\t"}{.usedBytes}{"\t"}{.samplesCount}{"\t"}{.usageRatio}{"\t"}{.growthBytesPerDay}{"\n"}{end}' 2>/dev/null || true)"
+  if [[ -z "${rows}" ]]; then
+    echo "  status.pvcs is empty"
+    return
+  fi
+  echo "  pvc usedBytes samples usageRatio growthBytesPerDay"
+  while IFS=$'\t' read -r name used samples ratio growth; do
+    [[ -n "${name}" ]] || continue
+    echo "  ${name} ${used:-0} ${samples:-0} ${ratio:-0} ${growth:-0}"
+  done <<<"${rows}"
+}
+
+capacityplan_has_nonzero_usage() {
+  local rows used
+  rows="$(kubectl get capacityplan "${PLAN_NAME}" \
+    -o jsonpath='{range .status.pvcs[*]}{.usedBytes}{"\n"}{end}' 2>/dev/null || true)"
+  [[ -n "${rows}" ]] || return 1
+  while IFS= read -r used; do
+    [[ -n "${used}" ]] || continue
+    if [[ "${used}" =~ ^[0-9]+$ ]] && (( used > 0 )); then
+      return 0
+    fi
+  done <<<"${rows}"
+  return 1
 }
 
 to_int_or_zero() {
@@ -360,7 +392,25 @@ done
 [[ -n "${last_reconcile}" ]] || fail "CapacityPlan status.lastReconcileTime was not populated in time"
 
 log "Observing storage trends for ${TREND_OBSERVE_SECONDS}s"
-sleep "${TREND_OBSERVE_SECONDS}"
+remaining="${TREND_OBSERVE_SECONDS}"
+while (( remaining > 0 )); do
+  interval="${USAGE_SNAPSHOT_INTERVAL_SECONDS}"
+  if (( interval <= 0 )); then
+    interval=60
+  fi
+  if (( interval > remaining )); then
+    interval="${remaining}"
+  fi
+  sleep "${interval}"
+  remaining=$((remaining - interval))
+  print_capacityplan_usage_snapshot
+done
+
+if ! capacityplan_has_nonzero_usage; then
+  kubectl get capacityplan "${PLAN_NAME}" -o yaml || true
+  fail "all PVC usedBytes remained 0 during trend observation; no growth signal detected from metrics"
+fi
+
 last_reconcile_post="$(kubectl get capacityplan "${PLAN_NAME}" -o jsonpath='{.status.lastReconcileTime}' 2>/dev/null || true)"
 [[ -n "${last_reconcile_post}" ]] || fail "CapacityPlan did not continue reconciling during trend observation"
 [[ "${last_reconcile_post}" != "${last_reconcile}" ]] || fail "CapacityPlan lastReconcileTime did not advance during trend observation"

@@ -1,5 +1,6 @@
 resources:
   - bases/capacityplanning.pbsladek.io_capacityplans.yaml
+  - bases/capacityplanning.pbsladek.io_capacityplannotifications.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
 patches:

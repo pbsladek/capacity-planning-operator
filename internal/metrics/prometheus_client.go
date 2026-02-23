@@ -39,11 +39,11 @@ func NewPrometheusClient(baseURL string) *PrometheusClient {
 // and kubelet_volume_stats_capacity_bytes for the given PVC.
 func (c *PrometheusClient) GetUsage(ctx context.Context, key PVCKey) (PVCUsage, error) {
 	usedQuery := fmt.Sprintf(
-		`kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q}`,
+		`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`,
 		key.Namespace, key.Name,
 	)
 	capQuery := fmt.Sprintf(
-		`kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q}`,
+		`max(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q})`,
 		key.Namespace, key.Name,
 	)
 
@@ -62,7 +62,7 @@ func (c *PrometheusClient) GetUsage(ctx context.Context, key PVCKey) (PVCUsage, 
 // for the given PVC over the specified time range and step.
 func (c *PrometheusClient) GetUsageRange(ctx context.Context, key PVCKey, start, end time.Time, step time.Duration) ([]RangePoint, error) {
 	query := fmt.Sprintf(
-		`kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q}`,
+		`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`,
 		key.Namespace, key.Name,
 	)
 	return c.queryRange(ctx, query, start, end, step)
