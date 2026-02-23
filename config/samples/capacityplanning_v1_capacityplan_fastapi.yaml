@@ -19,12 +19,18 @@ spec:
     model: "local-capacity-model-v1"
     timeout: "15s"
     maxTokens: 256
+    # Reduce token usage by refreshing only alerting PVCs.
+    onlyAlertingPVCs: true
     fastapi:
       # In-cluster service URL keeps traffic local.
       url: "http://llm-api.ml.svc.cluster.local:8000/v1/insights"
+      # Optional explicit health endpoint. Defaults to /healthz on same host.
+      healthURL: "http://llm-api.ml.svc.cluster.local:8000/healthz"
       # Optional bearer token secret.
       authSecretRefName: "capacityplan-fastapi-auth"
       authSecretKey: "token"
       tlsSkipVerify: false
+      failureThreshold: 3
+      cooldown: "1m"
 
   grafanaDashboardNamespace: "monitoring"

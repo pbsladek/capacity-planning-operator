@@ -17,9 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -30,7 +35,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crzap "sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -42,6 +47,7 @@ import (
 )
 
 const defaultSampleRetention = 720
+const defaultBackfillStep = 5 * time.Minute
 
 var (
 	scheme   = runtime.NewScheme()
@@ -60,6 +66,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var prometheusURL string
+	var debug bool
 	var tlsOpts []func(*tls.Config)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
@@ -75,14 +82,19 @@ func main() {
 	flag.StringVar(&prometheusURL, "prometheus-url", "",
 		"Base URL of the Prometheus instance to query for PVC metrics (e.g. http://prometheus:9090). "+
 			"If empty, PVC usage is not collected from Prometheus.")
+	flag.BoolVar(&debug, "debug", false, "Enable debug logging (equivalent to --zap-log-level=debug).")
 
-	opts := zap.Options{
-		Development: true,
+	opts := crzap.Options{
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if debug {
+		lvl := zap.NewAtomicLevelAt(zapcore.DebugLevel)
+		opts.Level = &lvl
+	}
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(crzap.New(crzap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), we set the tlsOpts to disable HTTP/2 to mitigate
 	// CVE-2023-44487 (HTTP/2 Rapid Reset Attack).
@@ -136,6 +148,22 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "PVCWatcher")
 		os.Exit(1)
 	}
+	backfillConfigured := prometheusURL != ""
+	backfillSuccessfulPVCs := 0
+	backfillErrMsg := ""
+	if prometheusURL != "" {
+		start, end := backfillWindow(defaultSampleRetention, defaultBackfillStep, time.Now())
+		backfillCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		n, backfillErr := pvcWatcher.BackfillAllPVCs(backfillCtx, start, end, defaultBackfillStep)
+		backfillSuccessfulPVCs = n
+		if backfillErr != nil {
+			backfillErrMsg = backfillErr.Error()
+			setupLog.Error(backfillErr, "PVC startup backfill completed with errors", "successfulPVCs", n)
+		} else {
+			setupLog.Info("PVC startup backfill completed", "successfulPVCs", n)
+		}
+	}
 
 	operatorNamespace := os.Getenv("POD_NAMESPACE")
 	if operatorNamespace == "" {
@@ -143,15 +171,26 @@ func main() {
 	}
 
 	// Wire CapacityPlanReconciler. LLM provider is selected from CapacityPlan spec.
-	if err = (&controller.CapacityPlanReconciler{
-		Client:               mgr.GetClient(),
-		Scheme:               mgr.GetScheme(),
-		Watcher:              pvcWatcher,
-		DefaultMetricsClient: metricsClient,
-		DefaultRetention:     defaultSampleRetention,
-		OperatorNamespace:    operatorNamespace,
-	}).SetupWithManager(mgr); err != nil {
+	reconciler := &controller.CapacityPlanReconciler{
+		Client:                        mgr.GetClient(),
+		Scheme:                        mgr.GetScheme(),
+		Watcher:                       pvcWatcher,
+		DefaultMetricsClient:          metricsClient,
+		DefaultRetention:              defaultSampleRetention,
+		OperatorNamespace:             operatorNamespace,
+		StartupBackfillConfigured:     backfillConfigured,
+		StartupBackfillSuccessfulPVCs: backfillSuccessfulPVCs,
+		StartupBackfillError:          backfillErrMsg,
+	}
+	if err = reconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "CapacityPlan")
+		os.Exit(1)
+	}
+	if err = (&controller.CapacityPlanNotificationReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "CapacityPlanNotification")
 		os.Exit(1)
 	}
 
@@ -169,4 +208,16 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func backfillWindow(retention int, step time.Duration, now time.Time) (start, end time.Time) {
+	if retention < 1 {
+		retention = defaultSampleRetention
+	}
+	if step <= 0 {
+		step = defaultBackfillStep
+	}
+	end = now
+	start = end.Add(-time.Duration(retention) * step)
+	return start, end
 }

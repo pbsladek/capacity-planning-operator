@@ -24,6 +24,17 @@ spec:
     # Fire when predicted time to full < 7 days.
     daysUntilFull: 7
 
+  # Optional budget forecasting.
+  budgets:
+    namespaceBudgets:
+      - namespace: "default"
+        budget: "20Ti"
+    workloadBudgets:
+      - namespace: "default"
+        kind: "StatefulSet"
+        name: "postgres"
+        budget: "8Ti"
+
   # How often to refresh LLM capacity planning insights per PVC.
   llmInsightsInterval: "6h"
 
@@ -36,6 +47,8 @@ spec:
     # Request timeout and max output tokens.
     timeout: "15s"
     maxTokens: 256
+    # When true, only alerting PVCs trigger LLM refreshes.
+    onlyAlertingPVCs: false
     # Optional sampling temperature.
     # temperature: 0.2
 
@@ -57,10 +70,16 @@ spec:
     fastapi:
       # Example: http://llm-api.ml.svc.cluster.local:8000/v1/insights
       url: ""
+      # Optional health endpoint for degraded-mode checks.
+      healthURL: ""
       # Optional bearer token secret.
       authSecretRefName: ""
       authSecretKey: "token"
       tlsSkipVerify: false
+      # Enter degraded mode after this many consecutive failures.
+      failureThreshold: 3
+      # How long to stay degraded before retrying via health check.
+      cooldown: "1m"
 
   # Namespace where the Grafana dashboard ConfigMap is created.
   # Defaults to "default" if not set.

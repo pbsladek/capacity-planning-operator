@@ -15,6 +15,8 @@ const (
 const (
 	defaultTimeout   = 15 * time.Second
 	defaultMaxTokens = 256
+	defaultCooldown  = time.Minute
+	defaultFailures  = 3
 )
 
 // ProviderConfig contains normalized runtime settings for LLM providers.
@@ -44,9 +46,12 @@ type AnthropicConfig struct {
 
 // FastAPIConfig holds FastAPI-specific runtime settings.
 type FastAPIConfig struct {
-	URL           string
-	AuthToken     string
-	TLSSkipVerify bool
+	URL              string
+	AuthToken        string
+	TLSSkipVerify    bool
+	HealthURL        string
+	FailureThreshold int
+	Cooldown         time.Duration
 }
 
 func (c *ProviderConfig) normalize() {

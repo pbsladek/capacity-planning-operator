@@ -55,6 +55,53 @@ spec:
             description: CapacityPlanSpec defines the desired configuration for the
               capacity planning operator.
             properties:
+              budgets:
+                description: Budgets configures optional namespace/workload storage
+                  budget forecasting.
+                properties:
+                  namespaceBudgets:
+                    description: NamespaceBudgets defines per-namespace storage budgets.
+                    items:
+                      description: NamespaceBudgetSpec defines a storage budget for
+                        a namespace.
+                      properties:
+                        budget:
+                          description: Budget is a Kubernetes quantity string (for
+                            example "20Ti").
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - budget
+                      - namespace
+                      type: object
+                    type: array
+                  workloadBudgets:
+                    description: WorkloadBudgets defines per-workload storage budgets.
+                    items:
+                      description: WorkloadBudgetSpec defines a storage budget for
+                        a specific workload.
+                      properties:
+                        budget:
+                          description: Budget is a Kubernetes quantity string (for
+                            example "5Ti").
+                          type: string
+                        kind:
+                          description: Kind is workload kind (for example StatefulSet,
+                            Deployment, CronJob).
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - budget
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    type: array
+                type: object
               grafanaDashboardNamespace:
                 description: |-
                   GrafanaDashboardNamespace is the namespace where the Grafana dashboard
@@ -94,6 +141,25 @@ spec:
                           AuthSecretRefName is an optional Secret name (operator namespace)
                           containing a bearer token for FastAPI requests.
                         type: string
+                      cooldown:
+                        default: 1m
+                        description: |-
+                          Cooldown controls how long degraded mode lasts before trying a health check
+                          again. Defaults to 1 minute.
+                        type: string
+                      failureThreshold:
+                        default: 3
+                        description: |-
+                          FailureThreshold is the number of consecutive failures before entering
+                          degraded mode. Defaults to 3.
+                        maximum: 20
+                        minimum: 1
+                        type: integer
+                      healthURL:
+                        description: |-
+                          HealthURL is an optional health endpoint used for degraded-mode checks.
+                          If empty, the client derives one as <scheme>://<host>/healthz.
+                        type: string
                       tlsSkipVerify:
                         description: |-
                           TLSSkipVerify disables TLS cert verification for FastAPI HTTPS endpoint.
@@ -115,6 +181,13 @@ spec:
                     description: Model is the model identifier used by OpenAI/Anthropic/FastAPI
                       backends.
                     type: string
+                  onlyAlertingPVCs:
+                    default: false
+                    description: |-
+                      OnlyAlertingPVCs limits LLM refreshes to PVCs currently in alert state.
+                      When true, non-alerting PVCs keep their previous insight unchanged.
+                      Defaults to false.
+                    type: boolean
                   openai:
                     description: OpenAI provider settings.
                     properties:
@@ -209,6 +282,53 @@ spec:
           status:
             description: CapacityPlanStatus defines the observed state of CapacityPlan.
             properties:
+              anomalies:
+                description: Anomalies contains detected growth-behavior anomalies.
+                items:
+                  description: PVCAnomaly describes an anomalous growth behavior detected
+                    for a PVC.
+                  properties:
+                    confidenceR2:
+                      type: number
+                    dailyGrowthBytesPerDay:
+                      type: number
+                    growthAcceleration:
+                      type: number
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    severity:
+                      type: string
+                    time:
+                      format: date-time
+                      type: string
+                    type:
+                      type: string
+                    weeklyGrowthBytesPerDay:
+                      type: number
+                    workloadKind:
+                      type: string
+                    workloadName:
+                      type: string
+                  required:
+                  - confidenceR2
+                  - dailyGrowthBytesPerDay
+                  - growthAcceleration
+                  - message
+                  - name
+                  - namespace
+                  - severity
+                  - time
+                  - type
+                  - weeklyGrowthBytesPerDay
+                  type: object
+                type: array
+              anomalySummary:
+                description: AnomalySummary is a compact textual summary of anomalies.
+                type: string
               conditions:
                 description: Conditions hold the latest available observations of
                   the CapacityPlan's state.
@@ -272,6 +392,44 @@ spec:
                   last ran successfully.
                 format: date-time
                 type: string
+              namespaceForecasts:
+                description: NamespaceForecasts contains namespace-level budget forecasts.
+                items:
+                  description: StorageBudgetForecast describes projected budget breach
+                    timing for a namespace or workload.
+                  properties:
+                    budgetBytes:
+                      format: int64
+                      type: integer
+                    daysUntilBreach:
+                      type: number
+                    growthBytesPerDay:
+                      type: number
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    projectedBreachAt:
+                      format: date-time
+                      type: string
+                    scope:
+                      type: string
+                    usageRatio:
+                      type: number
+                    usedBytes:
+                      format: int64
+                      type: integer
+                  required:
+                  - budgetBytes
+                  - growthBytesPerDay
+                  - namespace
+                  - scope
+                  - usageRatio
+                  - usedBytes
+                  type: object
+                type: array
               observedGeneration:
                 description: ObservedGeneration is the generation of the CapacityPlan
                   spec that produced this status.
@@ -350,6 +508,242 @@ spec:
                   - name
                   - namespace
                   - samplesCount
+                  - usageRatio
+                  - usedBytes
+                  type: object
+                type: array
+              riskChangeSummary:
+                description: RiskChangeSummary is a compact textual summary of RiskChanges.
+                type: string
+              riskChanges:
+                description: RiskChanges captures new/escalated/recovered risk transitions
+                  for this reconcile.
+                items:
+                  description: PVCRiskChange describes a risk transition between previous
+                    and current top risks.
+                  properties:
+                    currentProjectedFullAt:
+                      format: date-time
+                      type: string
+                    currentWeeklyGrowthBytesPerDay:
+                      type: number
+                    message:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    previousProjectedFullAt:
+                      format: date-time
+                      type: string
+                    previousWeeklyGrowthBytesPerDay:
+                      type: number
+                    time:
+                      format: date-time
+                      type: string
+                    type:
+                      description: 'Type is one of: new, escalated, recovered.'
+                      type: string
+                  required:
+                  - message
+                  - name
+                  - namespace
+                  - time
+                  - type
+                  type: object
+                type: array
+              riskDigest:
+                description: RiskDigest is a human-readable summary of top growth
+                  and projected fill dates.
+                type: string
+              riskSnapshotHash:
+                description: RiskSnapshotHash is a digest of the current TopRisks
+                  set for change detection.
+                type: string
+              summary:
+                description: Summary is a compact leaderboard and count overview for
+                  quick operator UX.
+                properties:
+                  alertingPVCs:
+                    description: AlertingPVCs is the number of PVCs where AlertFiring=true.
+                    type: integer
+                  topByGrowth:
+                    description: TopByGrowth lists PVCs with the highest positive
+                      growth rate.
+                    items:
+                      description: PVCSummaryBrief is a compact per-PVC summary for
+                        leaderboard views.
+                      properties:
+                        alertFiring:
+                          type: boolean
+                        daysUntilFull:
+                          type: number
+                        growthBytesPerDay:
+                          type: number
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        usageRatio:
+                          type: number
+                      required:
+                      - alertFiring
+                      - growthBytesPerDay
+                      - name
+                      - namespace
+                      - usageRatio
+                      type: object
+                    type: array
+                  topBySoonestToFull:
+                    description: TopBySoonestToFull lists PVCs with the lowest non-nil
+                      DaysUntilFull.
+                    items:
+                      description: PVCSummaryBrief is a compact per-PVC summary for
+                        leaderboard views.
+                      properties:
+                        alertFiring:
+                          type: boolean
+                        daysUntilFull:
+                          type: number
+                        growthBytesPerDay:
+                          type: number
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        usageRatio:
+                          type: number
+                      required:
+                      - alertFiring
+                      - growthBytesPerDay
+                      - name
+                      - namespace
+                      - usageRatio
+                      type: object
+                    type: array
+                  topByUsage:
+                    description: TopByUsage lists the highest usage-ratio PVCs.
+                    items:
+                      description: PVCSummaryBrief is a compact per-PVC summary for
+                        leaderboard views.
+                      properties:
+                        alertFiring:
+                          type: boolean
+                        daysUntilFull:
+                          type: number
+                        growthBytesPerDay:
+                          type: number
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                        usageRatio:
+                          type: number
+                      required:
+                      - alertFiring
+                      - growthBytesPerDay
+                      - name
+                      - namespace
+                      - usageRatio
+                      type: object
+                    type: array
+                  totalPVCs:
+                    description: TotalPVCs is the number of PVC summaries included
+                      in status.
+                    type: integer
+                required:
+                - alertingPVCs
+                - totalPVCs
+                type: object
+              topRisks:
+                description: TopRisks lists the highest-risk PVCs ranked by weekly
+                  growth trend.
+                items:
+                  description: PVCRiskSummary is a trend-focused risk view for a single
+                    PVC.
+                  properties:
+                    alertFiring:
+                      type: boolean
+                    capacityBytes:
+                      format: int64
+                      type: integer
+                    confidenceR2:
+                      type: number
+                    dailyGrowthBytesPerDay:
+                      type: number
+                    daysUntilFull:
+                      type: number
+                    growthAcceleration:
+                      type: number
+                    llmInsight:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    projectedFullAt:
+                      format: date-time
+                      type: string
+                    usageRatio:
+                      type: number
+                    usedBytes:
+                      format: int64
+                      type: integer
+                    weeklyGrowthBytesPerDay:
+                      type: number
+                    workloadKind:
+                      type: string
+                    workloadName:
+                      type: string
+                    workloadNamespace:
+                      type: string
+                  required:
+                  - alertFiring
+                  - capacityBytes
+                  - confidenceR2
+                  - dailyGrowthBytesPerDay
+                  - growthAcceleration
+                  - name
+                  - namespace
+                  - usageRatio
+                  - usedBytes
+                  - weeklyGrowthBytesPerDay
+                  type: object
+                type: array
+              workloadForecasts:
+                description: WorkloadForecasts contains workload-level budget forecasts.
+                items:
+                  description: StorageBudgetForecast describes projected budget breach
+                    timing for a namespace or workload.
+                  properties:
+                    budgetBytes:
+                      format: int64
+                      type: integer
+                    daysUntilBreach:
+                      type: number
+                    growthBytesPerDay:
+                      type: number
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                    projectedBreachAt:
+                      format: date-time
+                      type: string
+                    scope:
+                      type: string
+                    usageRatio:
+                      type: number
+                    usedBytes:
+                      format: int64
+                      type: integer
+                  required:
+                  - budgetBytes
+                  - growthBytesPerDay
+                  - namespace
+                  - scope
                   - usageRatio
                   - usedBytes
                   type: object

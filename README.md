@@ -19,6 +19,7 @@ The operator uses two cooperating controllers:
 - Queries a metrics backend (`PVCMetricsClient`) for current usage (Prometheus client implementation provided).
 - Stores usage samples in an in-memory per-PVC ring buffer.
 - Updates operator Prometheus gauges for raw usage/capacity/sample count.
+- On startup (when `--prometheus-url` is set), backfills existing PVC history from Prometheus before steady-state reconciliation.
 
 2. `CapacityPlanReconciler`
 - Reconciles `CapacityPlan` resources.
@@ -58,8 +59,12 @@ CRD type definitions live in `api/v1/capacityplan_types.go`.
   - Minimum time between LLM refreshes per PVC (default `6h`).
 - `llm`
   - LLM provider config (`disabled|openai|anthropic|fastapi`), model, timeout/maxTokens/temperature.
+  - `llm.onlyAlertingPVCs` limits LLM refreshes to PVCs currently firing alerts.
   - OpenAI/Anthropic use Secret refs for API keys.
   - FastAPI supports in-cluster URL and optional bearer-token Secret.
+- `budgets`
+  - Optional forecast budgets by namespace/workload.
+  - `budgets.namespaceBudgets[].budget` and `budgets.workloadBudgets[].budget` use Kubernetes quantity format (for example `20Ti`).
 - `grafanaDashboardNamespace string`
   - Namespace where dashboard ConfigMap is written.
 
@@ -74,6 +79,41 @@ CRD type definitions live in `api/v1/capacityplan_types.go`.
 - sample count + last sample timestamp
 - `llmInsight` + `lastLLMTime`
 - `alertFiring`
+
+`status.summary` includes:
+
+- total PVC count
+- alerting PVC count
+- top-N by highest usage ratio
+- top-N by soonest predicted full
+- top-N by highest positive growth
+- readiness conditions (`Ready`, `PrometheusReady`, `LLMReady`, `BackfillReady`)
+
+`status.topRisks[]` includes:
+
+- top weekly growth PVCs
+- projected full date (`projectedFullAt`)
+- weekly vs daily growth and acceleration
+- trend confidence (`confidenceR2`)
+- inferred workload owner (`workloadKind/workloadName`)
+- optional per-risk `llmInsight`
+
+`status.riskDigest` provides a plan-level natural-language summary suitable for alert annotations.
+
+`status.riskChanges[]` and `status.riskChangeSummary` report new/escalated/recovered risk transitions between reconciles.
+
+`status.namespaceForecasts[]` and `status.workloadForecasts[]` provide storage budget forecasts:
+
+- configured budget bytes
+- current used bytes / ratio
+- aggregate growth bytes/day
+- optional `daysUntilBreach` and `projectedBreachAt`
+
+`status.anomalies[]` and `status.anomalySummary` capture detected growth anomalies:
+
+- `acceleration_spike`
+- `trend_instability`
+- `sudden_growth`
 
 ## Growth Algorithm
 
@@ -94,7 +134,17 @@ Metrics are registered in `internal/operator/metrics.go` and served by controlle
 - `capacityplan_pvc_usage_ratio{namespace,pvc}`
 - `capacityplan_pvc_growth_bytes_per_day{namespace,pvc}`
 - `capacityplan_pvc_days_until_full{namespace,pvc}` (`-1` means not calculable)
+- `capacityplan_pvc_projected_full_timestamp_seconds{namespace,pvc}` (`-1` means not calculable)
+- `capacityplan_pvc_growth_acceleration{namespace,pvc}` (daily-vs-weekly trend acceleration ratio)
+- `capacityplan_pvc_risk_changes_total{type}` (`type` = `new|escalated|recovered`)
+- `capacityplan_namespace_budget_days_to_breach{namespace}` (`-1` means not calculable)
+- `capacityplan_workload_budget_days_to_breach{namespace,kind,workload}` (`-1` means not calculable)
+- `capacityplan_pvc_anomaly{namespace,pvc,type}` (`type` = `acceleration_spike|trend_instability|sudden_growth`)
+- `capacityplan_pvc_anomalies_total{type}`
 - `capacityplan_pvc_samples_count{namespace,pvc}`
+- `capacityplan_llm_requests_total{provider,model}`
+- `capacityplan_llm_errors_total{provider,model}`
+- `capacityplan_llm_latency_seconds{provider,model}`
 
 ## Alerts and Dashboard
 
@@ -106,6 +156,31 @@ If `monitoring.coreos.com/v1 ServiceMonitor` is discoverable, the reconciler als
 - `PVCUsageCritical`
 - `PVCFillingUpSoon`
 - `PVCFillingUpCritical`
+- `PVCGrowthAccelerationSpike`
+- `PVCTrendInstability`
+- `NamespaceBudgetBreachSoon`
+- `WorkloadBudgetBreachSoon`
+
+Each generated rule now includes a `description` annotation enriched with `status.riskDigest` context (top growth PVCs and projected full dates).
+
+## Notifications
+
+`CapacityPlanNotification` resources can send risk digests to:
+
+- Slack webhook
+- SMTP email
+
+Features:
+
+- on-change dedupe (`spec.onChangeOnly`)
+- cooldown control (`spec.cooldown`)
+- dry-run mode (`spec.dryRun`)
+
+Example manifests:
+
+- `config/samples/capacityplanning_v1_capacityplannotification.yaml`
+- `config/samples/secret_notification_slack_webhook.yaml`
+- `config/samples/secret_notification_smtp.yaml`
 
 ### Grafana Dashboard
 
@@ -120,11 +195,26 @@ This supports Grafana sidecar-based dashboard auto-discovery.
 LLM integration is abstracted by `internal/llm.InsightGenerator`.
 
 `CapacityPlanReconciler` resolves provider config from `spec.llm` and instantiates the selected backend (`openai`, `anthropic`, or `fastapi`). Rate-limiting is enforced via `status.lastLLMTime` and `spec.llmInsightsInterval`.
+If `spec.llm.onlyAlertingPVCs=true`, only PVCs with `alertFiring=true` trigger LLM refreshes.
 
 Provider auth details:
 - `openai`: secret in operator namespace (`spec.llm.openai.secretRefName`, key default `apiKey`)
 - `anthropic`: secret in operator namespace (`spec.llm.anthropic.secretRefName`, key default `apiKey`)
 - `fastapi`: optional bearer token secret (`spec.llm.fastapi.authSecretRefName`, key default `token`)
+
+FastAPI resilience details:
+- Supports `healthURL` (defaults to `/<host>/healthz`).
+- Enters degraded mode after configurable consecutive failures.
+- During degraded mode, insight calls short-circuit until cooldown expires.
+- Recovery requires a successful health probe before traffic resumes.
+
+## Logging
+
+The operator uses controller-runtime/zap structured logging (JSON by default).
+
+- `--debug=true` enables debug verbosity.
+- `--zap-log-level=debug` (or numeric levels) is also supported.
+- `--zap-encoder=json|console` and other standard zap flags are supported.
 
 ## Repository Layout
 
@@ -209,12 +299,13 @@ Provider-specific examples:
 
 These are the main operational caveats to keep in mind:
 
-1. The watcher is globally shared, while `CapacityPlan` is cluster-scoped and can be created multiple times.
-- `spec.prometheusURL` and `spec.sampleRetention` are now applied by `CapacityPlanReconciler` to the shared watcher.
-- If multiple plans use different values, the most recently reconciled plan becomes the active watcher configuration.
+1. Only one `CapacityPlan` is active at a time.
+- The controller selects the active plan deterministically (oldest creation timestamp, then name).
+- Non-active plans are marked `Ready=False` (`Reason=NotActivePlan`) and do not drive watcher or LLM behavior.
 
-2. Historical backfill helper exists but is not invoked by startup flow.
-- `PVCWatcherReconciler.BackfillFromRange(...)` is implemented but not currently called from `cmd/main.go`/controller wiring.
+2. Startup backfill state is process-scoped.
+- Startup backfill is wired in `cmd/main.go` via `BackfillAllPVCs(...)` when `--prometheus-url` is configured.
+- Default backfill window is retention-based (`720` samples at `5m` step by default).
 
 3. There is leftover scaffold code for Sample resources.
 - The repo still contains Sample API/controller artifacts used as scaffolding and compatibility (`api/v1/sample_types.go`, `internal/controller/sample_controller.go`, related CRDs/RBAC rules).
@@ -223,10 +314,9 @@ These are the main operational caveats to keep in mind:
 
 High-impact next steps for this operator:
 
-1. Define and enforce a strict policy for multiple `CapacityPlan` objects (currently last-reconciled plan wins for watcher config).
-2. Add startup backfill invocation for tracked PVCs.
-3. Add provider client caching and retry/backoff policy tuning for large clusters.
-4. Remove legacy `Sample` API/controller scaffold.
+1. Add stronger provider client cache eviction and retry/backoff policy tuning for large clusters.
+2. Remove legacy `Sample` API/controller scaffold.
+3. Add optional persistence backend for historical samples to survive pod restarts.
 
 ## License
 

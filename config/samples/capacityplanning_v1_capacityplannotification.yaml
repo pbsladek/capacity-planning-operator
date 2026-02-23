@@ -1,0 +1,31 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlanNotification
+metadata:
+  name: cluster-digest
+  namespace: default
+spec:
+  # CapacityPlan to monitor.
+  planRefName: "cluster"
+  # Send only when top-risk snapshot changes.
+  onChangeOnly: true
+  # Minimum time between sends.
+  cooldown: "30m"
+  # Set true to validate rendering without external delivery.
+  dryRun: true
+
+  slack:
+    enabled: true
+    webhookSecretRefName: "capacityplan-slack-webhook"
+    webhookSecretKey: "webhookURL"
+
+  email:
+    enabled: false
+    smtpSecretRefName: "capacityplan-smtp"
+    smtpHostKey: "host"
+    smtpPortKey: "port"
+    smtpUsernameKey: "username"
+    smtpPasswordKey: "password"
+    from: "capacity-plan@example.com"
+    to:
+      - "storage-oncall@example.com"
+    subjectPrefix: "[capacity-plan]"

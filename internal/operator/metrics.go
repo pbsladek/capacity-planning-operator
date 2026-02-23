@@ -75,6 +75,75 @@ var (
 		[]string{"namespace", "pvc"},
 	)
 
+	// PVCProjectedFullTimestampSeconds is the projected Unix timestamp at which
+	// the PVC reaches full capacity, based on weekly growth trend.
+	// -1 means not calculable.
+	PVCProjectedFullTimestampSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "capacityplan_pvc_projected_full_timestamp_seconds",
+			Help: "Projected Unix timestamp when a PVC reaches full capacity from weekly growth trend. -1 if not calculable.",
+		},
+		[]string{"namespace", "pvc"},
+	)
+
+	// PVCGrowthAcceleration captures short-term trend acceleration as:
+	// (24h growth - weekly growth) / abs(weekly growth).
+	PVCGrowthAcceleration = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "capacityplan_pvc_growth_acceleration",
+			Help: "Relative acceleration of PVC growth trend based on daily vs weekly slope.",
+		},
+		[]string{"namespace", "pvc"},
+	)
+
+	// PVCRiskChangesTotal counts detected risk transitions per reconcile.
+	PVCRiskChangesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "capacityplan_pvc_risk_changes_total",
+			Help: "Total detected PVC risk transitions by type (new, escalated, recovered).",
+		},
+		[]string{"type"},
+	)
+
+	// NamespaceBudgetDaysToBreach is the projected days until namespace budget breach.
+	// -1 means not calculable or no positive growth.
+	NamespaceBudgetDaysToBreach = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "capacityplan_namespace_budget_days_to_breach",
+			Help: "Projected days until namespace storage budget breach. -1 if not calculable.",
+		},
+		[]string{"namespace"},
+	)
+
+	// WorkloadBudgetDaysToBreach is the projected days until workload budget breach.
+	// -1 means not calculable or no positive growth.
+	WorkloadBudgetDaysToBreach = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "capacityplan_workload_budget_days_to_breach",
+			Help: "Projected days until workload storage budget breach. -1 if not calculable.",
+		},
+		[]string{"namespace", "kind", "workload"},
+	)
+
+	// PVCAnomaly indicates whether a PVC currently matches an anomaly type.
+	// 1 means anomaly active, 0 means not active.
+	PVCAnomaly = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "capacityplan_pvc_anomaly",
+			Help: "Current anomaly flag per PVC and anomaly type (1 active, 0 inactive).",
+		},
+		[]string{"namespace", "pvc", "type"},
+	)
+
+	// PVCAnomaliesTotal counts detected PVC anomalies by type.
+	PVCAnomaliesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "capacityplan_pvc_anomalies_total",
+			Help: "Total detected PVC anomalies by type.",
+		},
+		[]string{"type"},
+	)
+
 	// PVCSamplesCount is the number of samples currently held in the ring buffer.
 	// Set by PVCWatcherReconciler after each push.
 	PVCSamplesCount = prometheus.NewGaugeVec(
@@ -83,6 +152,34 @@ var (
 			Help: "Number of samples currently stored in the ring buffer for a PVC.",
 		},
 		[]string{"namespace", "pvc"},
+	)
+
+	// LLMRequestsTotal counts LLM insight generation attempts.
+	LLMRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "capacityplan_llm_requests_total",
+			Help: "Total LLM insight generation requests.",
+		},
+		[]string{"provider", "model"},
+	)
+
+	// LLMErrorsTotal counts failed LLM insight generation attempts.
+	LLMErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "capacityplan_llm_errors_total",
+			Help: "Total failed LLM insight generation requests.",
+		},
+		[]string{"provider", "model"},
+	)
+
+	// LLMLatencySeconds observes LLM request latency.
+	LLMLatencySeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "capacityplan_llm_latency_seconds",
+			Help:    "Latency of LLM insight generation requests in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"provider", "model"},
 	)
 )
 
@@ -95,6 +192,16 @@ func init() {
 		PVCUsageRatio,
 		PVCGrowthBytesPerDay,
 		PVCDaysUntilFull,
+		PVCProjectedFullTimestampSeconds,
+		PVCGrowthAcceleration,
+		PVCRiskChangesTotal,
+		NamespaceBudgetDaysToBreach,
+		WorkloadBudgetDaysToBreach,
+		PVCAnomaly,
+		PVCAnomaliesTotal,
 		PVCSamplesCount,
+		LLMRequestsTotal,
+		LLMErrorsTotal,
+		LLMLatencySeconds,
 	)
 }

@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -72,7 +74,7 @@ func NewPVCWatcherReconciler(c client.Client, mc metrics.PVCMetricsClient, capac
 // Reconcile is triggered whenever a PVC is created, updated, or deleted.
 // It queries the PVC's current usage from Prometheus and records a sample.
 func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
+	logger := log.FromContext(ctx).WithValues("pvc", req.Namespace+"/"+req.Name)
 	key := req.Namespace + "/" + req.Name
 
 	// Fetch the PVC.
@@ -81,6 +83,7 @@ func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if errors.IsNotFound(err) {
 			// PVC deleted — clean up its state.
 			r.deleteState(key)
+			logger.V(1).Info("PVC deleted; cleaned in-memory state")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -100,7 +103,7 @@ func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	})
 	if err != nil {
 		logger.V(1).Info("failed to get PVC usage from metrics client",
-			"pvc", key, "error", err)
+			"error", err)
 		return ctrl.Result{}, nil
 	}
 
@@ -128,6 +131,11 @@ func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ratio := float64(usage.UsedBytes) / float64(capacityBytes)
 		opmetrics.PVCUsageRatio.WithLabelValues(labels...).Set(ratio)
 	}
+	logger.V(1).Info("recorded PVC usage sample",
+		"usedBytes", usage.UsedBytes,
+		"capacityBytes", capacityBytes,
+		"samplesCount", state.Buffer.Len(),
+	)
 
 	return ctrl.Result{}, nil
 }
@@ -163,6 +171,7 @@ func (r *PVCWatcherReconciler) BackfillFromRange(
 	start, end time.Time,
 	step time.Duration,
 ) error {
+	logger := log.FromContext(ctx).WithValues("pvc", namespace+"/"+name)
 	key := namespace + "/" + name
 	state := r.ensureState(key, uid)
 
@@ -174,6 +183,12 @@ func (r *PVCWatcherReconciler) BackfillFromRange(
 	if err != nil {
 		return err
 	}
+	logger.V(1).Info("backfilling PVC from metrics range",
+		"start", start.UTC().Format(time.RFC3339),
+		"end", end.UTC().Format(time.RFC3339),
+		"step", step.String(),
+		"points", len(points),
+	)
 
 	for _, p := range points {
 		state.Buffer.Push(analysis.Sample{
@@ -182,6 +197,44 @@ func (r *PVCWatcherReconciler) BackfillFromRange(
 		})
 	}
 	return nil
+}
+
+// BackfillAllPVCs backfills in-memory ring buffers for all PVCs currently
+// visible to the operator client. Errors are aggregated; successful PVCs are
+// still backfilled even if others fail.
+func (r *PVCWatcherReconciler) BackfillAllPVCs(
+	ctx context.Context,
+	start, end time.Time,
+	step time.Duration,
+) (int, error) {
+	logger := log.FromContext(ctx)
+	if step <= 0 {
+		return 0, fmt.Errorf("step must be > 0")
+	}
+
+	var list corev1.PersistentVolumeClaimList
+	if err := r.List(ctx, &list); err != nil {
+		return 0, err
+	}
+
+	success := 0
+	var errs []error
+	for i := range list.Items {
+		pvc := &list.Items[i]
+		if err := r.BackfillFromRange(ctx, pvc.Namespace, pvc.Name, pvc.UID, start, end, step); err != nil {
+			logger.V(1).Info("PVC backfill failed", "pvc", pvc.Namespace+"/"+pvc.Name, "error", err)
+			errs = append(errs, fmt.Errorf("%s/%s: %w", pvc.Namespace, pvc.Name, err))
+			continue
+		}
+		success++
+	}
+
+	logger.V(1).Info("PVC backfill completed",
+		"successfulPVCs", success,
+		"totalPVCs", len(list.Items),
+		"hadErrors", len(errs) > 0,
+	)
+	return success, stderrors.Join(errs...)
 }
 
 // AllKeys returns the set of PVC keys currently tracked, as "namespace/name" strings.
@@ -280,6 +333,11 @@ func (r *PVCWatcherReconciler) deleteState(key string) {
 	opmetrics.PVCSamplesCount.DeleteLabelValues(labels...)
 	opmetrics.PVCGrowthBytesPerDay.DeleteLabelValues(labels...)
 	opmetrics.PVCDaysUntilFull.DeleteLabelValues(labels...)
+	opmetrics.PVCProjectedFullTimestampSeconds.DeleteLabelValues(labels...)
+	opmetrics.PVCGrowthAcceleration.DeleteLabelValues(labels...)
+	for _, t := range supportedAnomalyTypes {
+		opmetrics.PVCAnomaly.DeleteLabelValues(ns, name, t)
+	}
 }
 
 // splitKey splits a "namespace/name" key into its components.
