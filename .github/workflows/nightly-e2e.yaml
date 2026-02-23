@@ -81,12 +81,15 @@ jobs:
       - name: Run Alert Delivery Validation
         run: bash hack/ci/nightly_alert_delivery.sh
 
-      - name: Dump Diagnostics on Failure
+      - name: Collect Diagnostics on Failure
         if: failure()
-        run: |
-          kubectl get nodes -o wide || true
-          kubectl get pods -A -o wide || true
-          kubectl -n k8s-operator-system get deploy,po,svc || true
-          kubectl -n monitoring get deploy,po,svc,sts,prometheusrule || true
-          kubectl -n monitoring logs deploy/alert-receiver --tail=400 || true
-          kubectl -n k8s-operator-system logs deploy/k8s-operator-controller-manager --tail=500 || true
+        run: bash hack/ci/collect_diagnostics.sh
+
+      - name: Upload Diagnostics Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/cpo-ci-diagnostics
+          if-no-files-found: warn
+          retention-days: 14

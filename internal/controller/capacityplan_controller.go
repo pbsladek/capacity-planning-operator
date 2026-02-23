@@ -1713,6 +1713,8 @@ func buildPrometheusRuleUnstructured(
 	obj.SetNamespace("default")
 	obj.SetLabels(map[string]string{
 		"app.kubernetes.io/managed-by": "capacity-plan-operator",
+		"app.kubernetes.io/instance":   "kube-prometheus-stack",
+		"release":                      "kube-prometheus-stack",
 	})
 
 	usageExpr := strconv.FormatFloat(usageThreshold, 'f', 2, 64)

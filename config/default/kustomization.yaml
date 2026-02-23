@@ -7,6 +7,7 @@ namespace: k8s-operator-system
 namePrefix: k8s-operator-
 
 resources:
-- ../crd
-- ../rbac
-- ../manager
+  - ../crd
+  - ../rbac
+  - ../manager
+  - ../prometheus

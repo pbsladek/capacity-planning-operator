@@ -255,6 +255,19 @@ print_prometheus_pvc_raw_snapshot() {
   done
 }
 
+prometheus_has_nonzero_pvc_usage() {
+  local pvc used
+  for pvc in cpo-ci-steady-pvc cpo-ci-bursty-pvc cpo-ci-trickle-pvc cpo-ci-churn-pvc cpo-ci-delayed-pvc; do
+    used="$(prometheus_instant_scalar "max(kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"${pvc}\"})" || true)"
+    if [[ "${used}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
+      if awk -v u="${used}" 'BEGIN { exit !(u > 0) }'; then
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
 to_int_or_zero() {
   local v="${1:-}"
   if [[ "${v}" =~ ^[0-9]+$ ]]; then
@@ -501,7 +514,7 @@ while (( remaining > 0 )); do
   if (( growing_pvcs_now > max_growing_pvcs )); then
     max_growing_pvcs="${growing_pvcs_now}"
   fi
-  if capacityplan_has_nonzero_usage; then
+  if capacityplan_has_nonzero_usage || prometheus_has_nonzero_pvc_usage; then
     saw_nonzero_usage=1
   fi
   if prometheus_has_capacity_alerts; then

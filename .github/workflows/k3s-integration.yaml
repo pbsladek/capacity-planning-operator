@@ -79,17 +79,15 @@ jobs:
           EXPECTED_KUBE_CONTEXT: k3d-${{ env.CLUSTER_NAME }}
         run: bash hack/ci/k3s_integration.sh
 
-      - name: Dump Diagnostics on Failure
+      - name: Collect Diagnostics on Failure
         if: ${{ failure() }}
-        run: |
-          kubectl get nodes -o wide || true
-          kubectl get pods -A -o wide || true
-          kubectl -n k8s-operator-system get deploy,po,svc || true
-          kubectl -n monitoring get deploy,po,svc,sts || true
-          kubectl get capacityplans.capacityplanning.pbsladek.io -A || true
-          kubectl get capacityplan ci-plan -o yaml || true
-          kubectl -n k8s-operator-system logs deploy/k8s-operator-controller-manager --tail=400 || true
-          kubectl -n monitoring logs deploy/kube-prometheus-stack-operator --tail=400 || true
-          [ -f /tmp/prometheus-port-forward.log ] && cat /tmp/prometheus-port-forward.log || true
-          [ -f /tmp/alertmanager-port-forward.log ] && cat /tmp/alertmanager-port-forward.log || true
-          [ -f /tmp/manager-port-forward.log ] && cat /tmp/manager-port-forward.log || true
+        run: bash hack/ci/collect_diagnostics.sh
+
+      - name: Upload Diagnostics Artifact
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: k3s-integration-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/cpo-ci-diagnostics
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,5 +1,15 @@
 # capacity-planning-operator
 
+## Thread Continuity (Read First)
+
+For restarting work in a new agent thread:
+
+1. Read `AGENTS.md` for handoff protocol.
+2. Read `MEMORY.md` for latest project state, changed files, and next actions.
+3. Run `git status --short` before making edits.
+
+`CLAUDE.md` is reference documentation; `MEMORY.md` is the current working state.
+
 A Kubernetes operator that watches PVC storage usage across all namespaces, tracks growth rates using
 an in-memory ring buffer and OLS linear regression, exports Prometheus metrics, integrates optionally
 with Alertmanager (PrometheusRule) and Grafana, and generates LLM-backed capacity planning insights.

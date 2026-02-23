@@ -159,6 +159,22 @@ func TestBuildPrometheusRuleUnstructured_IncludesBudgetAndAnomalyAlerts(t *testi
 	}
 }
 
+func TestBuildPrometheusRuleUnstructured_IncludesKubePromSelectorLabels(t *testing.T) {
+	t.Parallel()
+
+	plan := &capacityv1.CapacityPlan{}
+	plan.Name = "cluster"
+	obj := buildPrometheusRuleUnstructured(plan, 0.85, 7, "digest")
+
+	labels := obj.GetLabels()
+	if labels["release"] != "kube-prometheus-stack" {
+		t.Fatalf("expected release label for kube-prometheus-stack, got %q", labels["release"])
+	}
+	if labels["app.kubernetes.io/instance"] != "kube-prometheus-stack" {
+		t.Fatalf("expected app.kubernetes.io/instance label for kube-prometheus-stack, got %q", labels["app.kubernetes.io/instance"])
+	}
+}
+
 func TestDetectRiskChanges_NewEscalatedRecovered(t *testing.T) {
 	t.Parallel()
 
