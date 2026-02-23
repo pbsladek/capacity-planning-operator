@@ -69,6 +69,11 @@ Stabilize k3s integration/nightly alerting CI so capacity alerts are reliably ev
      - `MIN_GROWTH_MATCHING_PVCS`
    - Result is included in final `Validation report` as `growth_math_crosscheck`.
 
+10. Removed unnecessary host `setup-go` step from integration workflows.
+    - `.github/workflows/k3s-integration.yaml`
+    - `.github/workflows/nightly-e2e.yaml`
+    - These jobs do not run host Go commands; removing setup-go avoids transient GitHub cache backend warnings (`Failed to restore/save cache`) and slightly reduces runtime.
+
 ## Validation Run
 
 1. `bash -n hack/ci/k3s_integration.sh` passed.
