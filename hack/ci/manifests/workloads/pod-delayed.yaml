@@ -19,7 +19,7 @@ spec:
             sync
             sleep 10
           done
-          sleep 120
+          sleep 1800
       volumeMounts:
         - name: data
           mountPath: /data

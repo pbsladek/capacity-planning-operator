@@ -23,7 +23,7 @@ spec:
             done
             sleep 25
           done
-          sleep 120
+          sleep 1800
       volumeMounts:
         - name: data
           mountPath: /data

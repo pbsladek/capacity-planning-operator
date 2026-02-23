@@ -14,6 +14,9 @@ KUBE_PROM_STACK_CHART_VERSION="${KUBE_PROM_STACK_CHART_VERSION:-65.8.1}"
 CI_MANIFEST_DIR="${CI_MANIFEST_DIR:-hack/ci/manifests}"
 TREND_OBSERVE_SECONDS="${TREND_OBSERVE_SECONDS:-480}"
 USAGE_SNAPSHOT_INTERVAL_SECONDS="${USAGE_SNAPSHOT_INTERVAL_SECONDS:-180}"
+USAGE_RATIO_SANITY_MAX="${USAGE_RATIO_SANITY_MAX:-0}"
+MIN_GROWTH_BYTES_PER_MIN="${MIN_GROWTH_BYTES_PER_MIN:-1024}"
+MIN_GROWING_PVCS="${MIN_GROWING_PVCS:-3}"
 PLAN_SAMPLE_RETENTION="${PLAN_SAMPLE_RETENTION:-24}"
 PLAN_SAMPLE_INTERVAL="${PLAN_SAMPLE_INTERVAL:-5s}"
 PLAN_RECONCILE_INTERVAL="${PLAN_RECONCILE_INTERVAL:-15s}"
@@ -137,6 +140,16 @@ manager_metrics_have_capacity_series() {
   grep -q "^capacityplan_pvc_anomaly" <<<"${out}" || return 1
 }
 
+prometheus_instant_scalar() {
+  local query="$1"
+  local out val
+  out="$(curl -fsS --max-time 5 --get --data-urlencode "query=${query}" http://127.0.0.1:19090/api/v1/query || true)"
+  [[ -n "${out}" ]] || return 1
+  val="$(printf '%s' "${out}" | sed -n 's/.*"value":[[][^,]*,"\([^"]*\)"[]].*/\1/p' | head -n1)"
+  [[ -n "${val}" ]] || return 1
+  printf '%s' "${val}"
+}
+
 print_capacityplan_usage_snapshot() {
   local now rows
   now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -147,10 +160,12 @@ print_capacityplan_usage_snapshot() {
     echo "  status.pvcs is empty"
     return
   fi
-  echo "  pvc usedBytes samples usageRatio growthBytesPerDay"
+  echo "  pvc usedBytes samples usageRatio growthBytesPerDay growthBytesPerMin"
   while IFS=$'\t' read -r name used samples ratio growth; do
     [[ -n "${name}" ]] || continue
-    echo "  ${name} ${used:-0} ${samples:-0} ${ratio:-0} ${growth:-0}"
+    local growth_per_min
+    growth_per_min="$(awk -v g="${growth:-0}" 'BEGIN { printf "%.2f", g/1440 }')"
+    echo "  ${name} ${used:-0} ${samples:-0} ${ratio:-0} ${growth:-0} ${growth_per_min}"
   done <<<"${rows}"
 }
 
@@ -166,6 +181,78 @@ capacityplan_has_nonzero_usage() {
     fi
   done <<<"${rows}"
   return 1
+}
+
+capacityplan_count_growing_pvcs() {
+  local rows count
+  rows="$(kubectl get capacityplan "${PLAN_NAME}" \
+    -o jsonpath='{range .status.pvcs[*]}{.name}{"\t"}{.growthBytesPerDay}{"\n"}{end}' 2>/dev/null || true)"
+  [[ -n "${rows}" ]] || {
+    echo 0
+    return
+  }
+  count="$(printf '%s\n' "${rows}" \
+    | awk -F'\t' -v min_per_min="${MIN_GROWTH_BYTES_PER_MIN}" '
+      BEGIN { c=0; min_day=min_per_min*1440 }
+      NF>=2 {
+        g=$2+0
+        if (g > min_day) c++
+      }
+      END { print c+0 }')"
+  echo "${count}"
+}
+
+print_growth_per_min_summary() {
+  local rows now
+  rows="$(kubectl get capacityplan "${PLAN_NAME}" \
+    -o jsonpath='{range .status.pvcs[*]}{.name}{"\t"}{.growthBytesPerDay}{"\n"}{end}' 2>/dev/null || true)"
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo "[$now] Derived growth summary (bytes/min)"
+  if [[ -z "${rows}" ]]; then
+    echo "  status.pvcs is empty"
+    return
+  fi
+  echo "  pvc growthBytesPerMin"
+  while IFS=$'\t' read -r name growth_day; do
+    [[ -n "${name}" ]] || continue
+    growth_per_min="$(awk -v g="${growth_day:-0}" 'BEGIN { printf "%.2f", g/1440 }')"
+    echo "  ${name} ${growth_per_min}"
+  done <<<"${rows}"
+}
+
+capacityplan_has_invalid_usage_ratio() {
+  local rows bad
+  if ! awk -v max="${USAGE_RATIO_SANITY_MAX}" 'BEGIN { exit !(max > 0) }'; then
+    return 1
+  fi
+  rows="$(kubectl get capacityplan "${PLAN_NAME}" \
+    -o jsonpath='{range .status.pvcs[*]}{.name}{"\t"}{.usageRatio}{"\t"}{.usedBytes}{"\t"}{.capacityBytes}{"\n"}{end}' 2>/dev/null || true)"
+  [[ -n "${rows}" ]] || return 1
+  bad="$(printf '%s\n' "${rows}" \
+    | awk -F'\t' -v max="${USAGE_RATIO_SANITY_MAX}" 'NF>=4 && ($2+0) > max {printf "%s ratio=%s used=%s cap=%s\n", $1, $2, $3, $4}')"
+  if [[ -n "${bad}" ]]; then
+    echo "Detected invalid usage ratios (> ${USAGE_RATIO_SANITY_MAX}):" >&2
+    printf '%s\n' "${bad}" | sed 's/^/  /' >&2
+    return 0
+  fi
+  return 1
+}
+
+print_prometheus_pvc_raw_snapshot() {
+  local now pvc used cap series ratio
+  now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo "[$now] Prometheus PVC raw snapshot (default namespace)"
+  echo "  pvc usedBytes capBytes ratio usedSeriesCount"
+  for pvc in cpo-ci-steady-pvc cpo-ci-bursty-pvc cpo-ci-trickle-pvc cpo-ci-churn-pvc cpo-ci-delayed-pvc; do
+    used="$(prometheus_instant_scalar "max(kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"${pvc}\"})" || true)"
+    cap="$(prometheus_instant_scalar "max(kubelet_volume_stats_capacity_bytes{namespace=\"default\",persistentvolumeclaim=\"${pvc}\"})" || true)"
+    series="$(prometheus_instant_scalar "count(kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"${pvc}\"})" || true)"
+    ratio="n/a"
+    if [[ "${used}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]] && [[ "${cap}" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]]; then
+      ratio="$(awk -v u="${used}" -v c="${cap}" 'BEGIN { if (c > 0) printf "%.6f", u/c; else printf "n/a" }')"
+    fi
+    echo "  ${pvc} ${used:-n/a} ${cap:-n/a} ${ratio} ${series:-n/a}"
+  done
 }
 
 to_int_or_zero() {
@@ -393,6 +480,9 @@ done
 
 log "Observing storage trends for ${TREND_OBSERVE_SECONDS}s"
 remaining="${TREND_OBSERVE_SECONDS}"
+saw_nonzero_usage=0
+saw_capacity_alerts=0
+max_growing_pvcs=0
 while (( remaining > 0 )); do
   interval="${USAGE_SNAPSHOT_INTERVAL_SECONDS}"
   if (( interval <= 0 )); then
@@ -404,11 +494,32 @@ while (( remaining > 0 )); do
   sleep "${interval}"
   remaining=$((remaining - interval))
   print_capacityplan_usage_snapshot
+  print_growth_per_min_summary
+  print_prometheus_pvc_raw_snapshot
+  growing_pvcs_now="$(capacityplan_count_growing_pvcs)"
+  echo "  growingPVCsAboveThreshold=${growing_pvcs_now} thresholdBytesPerMin=${MIN_GROWTH_BYTES_PER_MIN}"
+  if (( growing_pvcs_now > max_growing_pvcs )); then
+    max_growing_pvcs="${growing_pvcs_now}"
+  fi
+  if capacityplan_has_nonzero_usage; then
+    saw_nonzero_usage=1
+  fi
+  if prometheus_has_capacity_alerts; then
+    saw_capacity_alerts=1
+  fi
+  if capacityplan_has_invalid_usage_ratio; then
+    kubectl get capacityplan "${PLAN_NAME}" -o yaml || true
+    fail "capacity plan usage ratio exceeded sanity limit (${USAGE_RATIO_SANITY_MAX}); metrics source likely incorrect"
+  fi
 done
 
-if ! capacityplan_has_nonzero_usage; then
+if (( saw_nonzero_usage == 0 )); then
   kubectl get capacityplan "${PLAN_NAME}" -o yaml || true
-  fail "all PVC usedBytes remained 0 during trend observation; no growth signal detected from metrics"
+  fail "all PVC usedBytes remained 0 throughout trend observation; no growth signal detected from metrics"
+fi
+if (( max_growing_pvcs < MIN_GROWING_PVCS )); then
+  kubectl get capacityplan "${PLAN_NAME}" -o yaml || true
+  fail "peak growing PVC count was ${max_growing_pvcs}; required at least ${MIN_GROWING_PVCS} PVCs above ${MIN_GROWTH_BYTES_PER_MIN} bytes/min during observation"
 fi
 
 last_reconcile_post="$(kubectl get capacityplan "${PLAN_NAME}" -o jsonpath='{.status.lastReconcileTime}' 2>/dev/null || true)"
@@ -468,8 +579,10 @@ wait_until "Alertmanager status API endpoint" "${ALERT_ENDPOINT_READY_TIMEOUT_SE
   alertmanager_api_ready
 
 log "Verifying capacity alerts in Prometheus rule evaluation first"
-wait_until "capacity alerts in Prometheus ALERTS metric" "${ALERT_PROPAGATION_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
-  prometheus_has_capacity_alerts
+if (( saw_capacity_alerts == 0 )); then
+  wait_until "capacity alerts in Prometheus ALERTS metric" "${ALERT_PROPAGATION_TIMEOUT_SECONDS}" "${POLL_INTERVAL_SECONDS}" \
+    prometheus_has_capacity_alerts
+fi
 
 log "Verifying workload budget alerts for each CI workload"
 for workload in cpo-ci-steady cpo-ci-bursty cpo-ci-trickle cpo-ci-churn cpo-ci-delayed; do
