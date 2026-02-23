@@ -91,7 +91,8 @@ node_has_image() {
   local refs="$2"
   local patterns="$3"
   local listed
-  listed="$(k3d node exec "${node}" -- sh -lc 'k3s ctr images ls -q 2>/dev/null || ctr -n k8s.io images ls -q 2>/dev/null || ctr images ls -q 2>/dev/null || true' || true)"
+  listed="$(k3d node exec "${node}" -- sh -lc 'k3s ctr -n k8s.io images ls 2>/dev/null || k3s ctr images ls 2>/dev/null || ctr -n k8s.io images ls 2>/dev/null || ctr images ls 2>/dev/null || true' \
+    | awk 'NR>1 {print $1}' || true)"
   [[ -n "${listed}" ]] || return 1
   while IFS= read -r ref; do
     [[ -n "${ref}" ]] || continue
@@ -140,6 +141,8 @@ check_image_on_all_nodes() {
     for node in "${nodes[@]}"; do
       if ! node_has_image "${node}" "${refs}" "${patterns}"; then
         echo "missing image on ${node}: ${image}" >&2
+        k3d node exec "${node}" -- sh -lc 'k3s ctr -n k8s.io images ls 2>/dev/null || k3s ctr images ls 2>/dev/null || ctr -n k8s.io images ls 2>/dev/null || ctr images ls 2>/dev/null || true' \
+          | sed 's/^/  [node images] /' >&2 || true
         missing=1
       fi
     done
