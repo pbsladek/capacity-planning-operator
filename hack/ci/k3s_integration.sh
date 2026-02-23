@@ -157,6 +157,26 @@ dump_manager_rollout_diagnostics() {
   echo "---- end rollout diagnostics ----"
 }
 
+new_manager_rs_has_image_pull_error() {
+  local rs_lines target_hash image hash
+  rs_lines="$(kubectl -n "${OP_NS}" get rs -l control-plane=controller-manager --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.spec.template.spec.containers[0].image}{"\t"}{.metadata.labels.pod-template-hash}{"\n"}{end}' 2>/dev/null || true)"
+
+  target_hash=""
+  while IFS=$'\t' read -r image hash; do
+    [[ -n "${image}" ]] || continue
+    [[ -n "${hash}" ]] || continue
+    if [[ "${image}" == "${OPERATOR_IMAGE}" ]]; then
+      target_hash="${hash}"
+    fi
+  done <<<"${rs_lines}"
+  [[ -n "${target_hash}" ]] || return 1
+
+  kubectl -n "${OP_NS}" get pods -l "control-plane=controller-manager,pod-template-hash=${target_hash}" \
+    -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null \
+    | grep -Eq '^(ImagePullBackOff|ErrImagePull)$'
+}
+
 wait_for_manager_rollout() {
   local deploy_name="$1"
   local timeout_seconds="$2"
@@ -202,11 +222,9 @@ wait_for_manager_rollout() {
     fi
 
     # Fail fast on terminal image pull states.
-    if kubectl -n "${OP_NS}" get pods -l control-plane=controller-manager \
-      -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null \
-      | grep -Eq '^(ImagePullBackOff|ErrImagePull)$'; then
+    if new_manager_rs_has_image_pull_error; then
       dump_manager_rollout_diagnostics "${deploy_name}"
-      fail "deployment/${deploy_name} hit ImagePullBackOff/ErrImagePull during rollout"
+      fail "deployment/${deploy_name} new ReplicaSet hit ImagePullBackOff/ErrImagePull during rollout"
     fi
 
     if (( elapsed >= timeout_seconds )); then
