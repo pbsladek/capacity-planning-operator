@@ -406,6 +406,42 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
+func pvBackendPath(pv *corev1.PersistentVolume, namespace, pvcName string) (string, error) {
+	switch {
+	case pv.Spec.HostPath != nil && strings.TrimSpace(pv.Spec.HostPath.Path) != "":
+		return strings.TrimSpace(pv.Spec.HostPath.Path), nil
+	case pv.Spec.Local != nil && strings.TrimSpace(pv.Spec.Local.Path) != "":
+		return strings.TrimSpace(pv.Spec.Local.Path), nil
+	default:
+		return "", fmt.Errorf("pv %s for pvc %s/%s is not hostPath/local-backed", pv.Name, namespace, pvcName)
+	}
+}
+
+func pvTargetNode(pv *corev1.PersistentVolume) string {
+	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
+		return ""
+	}
+	for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+		for _, expr := range term.MatchExpressions {
+			if expr.Key == corev1.LabelHostname && expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) > 0 {
+				return strings.TrimSpace(expr.Values[0])
+			}
+		}
+	}
+	return ""
+}
+
+func ensureUniqueBackendPath(pathOwner map[string]string, backendPath, pvcName string) error {
+	if owner, exists := pathOwner[backendPath]; exists && owner != pvcName {
+		return fmt.Errorf(
+			"duplicate PV backend path %q resolved for pvc %s and pvc %s; each PVC must have a unique backend path",
+			backendPath, owner, pvcName,
+		)
+	}
+	pathOwner[backendPath] = pvcName
+	return nil
+}
+
 func (r *IntegrationRunner) resolvePVCBackendMounts(ctx context.Context, namespace string, pvcNames []string) ([]pvcBackendMount, error) {
 	mounts := make([]pvcBackendMount, 0, len(pvcNames))
 	pathOwner := make(map[string]string, len(pvcNames))
@@ -421,37 +457,14 @@ func (r *IntegrationRunner) resolvePVCBackendMounts(ctx context.Context, namespa
 		if err != nil {
 			return nil, fmt.Errorf("getting pv %s for pvc %s/%s: %w", pvc.Spec.VolumeName, namespace, pvcName, err)
 		}
-		backendPath := ""
-		switch {
-		case pv.Spec.HostPath != nil && strings.TrimSpace(pv.Spec.HostPath.Path) != "":
-			backendPath = strings.TrimSpace(pv.Spec.HostPath.Path)
-		case pv.Spec.Local != nil && strings.TrimSpace(pv.Spec.Local.Path) != "":
-			backendPath = strings.TrimSpace(pv.Spec.Local.Path)
-		default:
-			return nil, fmt.Errorf("pv %s for pvc %s/%s is not hostPath/local-backed", pv.Name, namespace, pvcName)
+		backendPath, err := pvBackendPath(pv, namespace, pvcName)
+		if err != nil {
+			return nil, err
 		}
-		if owner, exists := pathOwner[backendPath]; exists && owner != pvcName {
-			return nil, fmt.Errorf(
-				"duplicate PV backend path %q resolved for pvc %s and pvc %s; each PVC must have a unique backend path",
-				backendPath, owner, pvcName,
-			)
+		if err := ensureUniqueBackendPath(pathOwner, backendPath, pvcName); err != nil {
+			return nil, err
 		}
-		pathOwner[backendPath] = pvcName
-		targetNode := ""
-		if pv.Spec.NodeAffinity != nil && pv.Spec.NodeAffinity.Required != nil {
-			for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
-				for _, expr := range term.MatchExpressions {
-					if expr.Key == corev1.LabelHostname && expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) > 0 {
-						targetNode = strings.TrimSpace(expr.Values[0])
-						break
-					}
-				}
-				if targetNode != "" {
-					break
-				}
-			}
-		}
-		mounts = append(mounts, pvcBackendMount{NodeName: targetNode, Path: backendPath})
+		mounts = append(mounts, pvcBackendMount{NodeName: pvTargetNode(pv), Path: backendPath})
 	}
 	return mounts, nil
 }
@@ -713,6 +726,84 @@ func (r *IntegrationRunner) pvcRequestedBytes(ctx context.Context, pvcName strin
 	return qty.Value(), true
 }
 
+type promPVCRawRow struct {
+	Name       string
+	Used       float64
+	UsedOK     bool
+	Cap        float64
+	CapOK      bool
+	Req        int64
+	ReqOK      bool
+	Series     float64
+	SeriesOK   bool
+	RatioStr   string
+	CapToReq   string
+	UsedStr    string
+	UsedMiBStr string
+	CapStr     string
+	CapMiBStr  string
+	ReqStr     string
+	SeriesStr  string
+	Mismatch   bool
+}
+
+func formatPromPVCRawRow(row *promPVCRawRow) {
+	row.RatioStr = "n/a"
+	if row.UsedOK && row.CapOK && row.Cap > 0 {
+		row.RatioStr = fmt.Sprintf("%.6f", row.Used/row.Cap)
+	}
+	row.CapToReq = "n/a"
+	if row.CapOK && row.ReqOK && row.Req > 0 {
+		ratio := row.Cap / float64(row.Req)
+		row.CapToReq = fmt.Sprintf("%.2f", ratio)
+		row.Mismatch = ratio > 4
+	}
+	row.UsedStr = "n/a"
+	row.UsedMiBStr = "n/a"
+	if row.UsedOK {
+		row.UsedStr = fmt.Sprintf("%.0f", row.Used)
+		row.UsedMiBStr = fmt.Sprintf("%.2f", row.Used/(1024.0*1024.0))
+	}
+	row.CapStr = "n/a"
+	row.CapMiBStr = "n/a"
+	if row.CapOK {
+		row.CapStr = fmt.Sprintf("%.0f", row.Cap)
+		row.CapMiBStr = fmt.Sprintf("%.2f", row.Cap/(1024.0*1024.0))
+	}
+	row.ReqStr = "n/a"
+	if row.ReqOK {
+		row.ReqStr = fmt.Sprintf("%d", row.Req)
+	}
+	row.SeriesStr = "n/a"
+	if row.SeriesOK {
+		row.SeriesStr = fmt.Sprintf("%.0f", row.Series)
+	}
+}
+
+func (r *IntegrationRunner) collectPromPVCRawRow(ctx context.Context, pvc string) promPVCRawRow {
+	used, usedOK := r.prometheusScalar(ctx, promUsedBytesQuery("default", pvc))
+	cap, capOK := r.prometheusScalar(ctx, promCapacityBytesQuery("default", pvc))
+	series, seriesOK := r.prometheusScalar(
+		ctx,
+		fmt.Sprintf(`count(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`, "default", pvc),
+	)
+	req, reqOK := r.pvcRequestedBytes(ctx, pvc)
+
+	row := promPVCRawRow{
+		Name:     pvc,
+		Used:     used,
+		UsedOK:   usedOK,
+		Cap:      cap,
+		CapOK:    capOK,
+		Req:      req,
+		ReqOK:    reqOK,
+		Series:   series,
+		SeriesOK: seriesOK,
+	}
+	formatPromPVCRawRow(&row)
+	return row
+}
+
 func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, pvcs []string) int {
 	now := time.Now().UTC().Format(time.RFC3339)
 	fmt.Printf("[%s] Prometheus PVC raw snapshot (default namespace)\n", now)
@@ -720,47 +811,23 @@ func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, p
 	fmt.Fprintln(tw, "  pvc\tusedBytes\tusedMiB\tcapBytes\tcapMiB\treqBytes\tratio\tusedSeriesCount\tcapToReq")
 	mismatchCount := 0
 	for _, pvc := range pvcs {
-		used, usedOK := r.prometheusScalar(ctx, promUsedBytesQuery("default", pvc))
-		cap, capOK := r.prometheusScalar(ctx, promCapacityBytesQuery("default", pvc))
-		series, seriesOK := r.prometheusScalar(ctx, fmt.Sprintf(`count(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`, "default", pvc))
-		req, reqOK := r.pvcRequestedBytes(ctx, pvc)
-
-		ratioStr := "n/a"
-		if usedOK && capOK && cap > 0 {
-			ratioStr = fmt.Sprintf("%.6f", used/cap)
+		row := r.collectPromPVCRawRow(ctx, pvc)
+		if row.Mismatch {
+			mismatchCount++
 		}
-		capToReq := "n/a"
-		if capOK && reqOK && req > 0 {
-			capToReq = fmt.Sprintf("%.2f", cap/float64(req))
-			if cap/float64(req) > 4 {
-				mismatchCount++
-			}
-		}
-		usedStr := "n/a"
-		if usedOK {
-			usedStr = fmt.Sprintf("%.0f", used)
-		}
-		capStr := "n/a"
-		if capOK {
-			capStr = fmt.Sprintf("%.0f", cap)
-		}
-		seriesStr := "n/a"
-		if seriesOK {
-			seriesStr = fmt.Sprintf("%.0f", series)
-		}
-		reqStr := "n/a"
-		if reqOK {
-			reqStr = fmt.Sprintf("%d", req)
-		}
-		usedMiB := "n/a"
-		if usedOK {
-			usedMiB = fmt.Sprintf("%.2f", used/(1024.0*1024.0))
-		}
-		capMiB := "n/a"
-		if capOK {
-			capMiB = fmt.Sprintf("%.2f", cap/(1024.0*1024.0))
-		}
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", pvc, usedStr, usedMiB, capStr, capMiB, reqStr, ratioStr, seriesStr, capToReq)
+		fmt.Fprintf(
+			tw,
+			"  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			row.Name,
+			row.UsedStr,
+			row.UsedMiBStr,
+			row.CapStr,
+			row.CapMiBStr,
+			row.ReqStr,
+			row.RatioStr,
+			row.SeriesStr,
+			row.CapToReq,
+		)
 	}
 	_ = tw.Flush()
 	if mismatchCount > 0 {
@@ -848,16 +915,12 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 	return nil
 }
 
-func (r *IntegrationRunner) printGrowthInterpretation(
-	cpGrowth []civerify.PVCGrowth,
-	summary civerify.ComparisonSummary,
-	opts civerify.CompareOptions,
-) {
+func statusGrowthStats(cpGrowth []civerify.PVCGrowth) (minPerMin, maxPerMin, avgPerMin float64) {
 	if len(cpGrowth) == 0 {
-		return
+		return 0, 0, 0
 	}
-	minPerMin := cpGrowth[0].StatusBytesPerDay / 1440.0
-	maxPerMin := minPerMin
+	minPerMin = cpGrowth[0].StatusBytesPerDay / 1440.0
+	maxPerMin = minPerMin
 	sumPerMin := 0.0
 	for _, row := range cpGrowth {
 		v := row.StatusBytesPerDay / 1440.0
@@ -869,10 +932,22 @@ func (r *IntegrationRunner) printGrowthInterpretation(
 		}
 		sumPerMin += v
 	}
-	avgPerMin := sumPerMin / float64(len(cpGrowth))
-	maxRelDiff := 0.0
+	avgPerMin = sumPerMin / float64(len(cpGrowth))
+	return minPerMin, maxPerMin, avgPerMin
+}
+
+func sortedComparisonRows(summary civerify.ComparisonSummary) []civerify.ComparisonRow {
+	rows := append([]civerify.ComparisonRow(nil), summary.Rows...)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Name < rows[j].Name
+	})
+	return rows
+}
+
+func comparisonMaxRelDiff(rows []civerify.ComparisonRow) (string, float64) {
 	maxRelName := ""
-	for _, row := range summary.Rows {
+	maxRelDiff := 0.0
+	for _, row := range rows {
 		if !row.HasPromData {
 			continue
 		}
@@ -881,26 +956,10 @@ func (r *IntegrationRunner) printGrowthInterpretation(
 			maxRelName = row.Name
 		}
 	}
-	noData := len(summary.Rows) - summary.Comparable
-	rows := append([]civerify.ComparisonRow(nil), summary.Rows...)
-	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].Name < rows[j].Name
-	})
-	fmt.Println("Growth interpretation")
-	fmt.Printf(
-		"  tolerances: relative=%.2f%% absolute=%.0f B/day (effective threshold per PVC: max(relative*scale, absolute))\n",
-		opts.RelativeTolerance*100.0,
-		opts.AbsToleranceBytesDay,
-	)
-	fmt.Printf("  status growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
-	fmt.Printf(
-		"  cross-check match: %d/%d comparable PVCs within tolerances (no-prom-data=%d, required comparable=%d, required matches=%d)\n",
-		summary.Matched,
-		summary.Comparable,
-		noData,
-		opts.MinComparablePVCs,
-		opts.MinMatchingPVCs,
-	)
+	return maxRelName, maxRelDiff
+}
+
+func printGrowthComparisonRowsTable(rows []civerify.ComparisonRow) {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "  pvc\tstatusMiBPerMin\tpromMiBPerMin\trelDiffPct\tallowedDiffBytesPerDay\tmatch\treason")
 	for _, row := range rows {
@@ -933,56 +992,88 @@ func (r *IntegrationRunner) printGrowthInterpretation(
 		)
 	}
 	_ = tw.Flush()
-	if summary.Matched < summary.Comparable {
-		fmt.Println("  mismatches:")
-		for _, row := range rows {
-			if !row.HasPromData || row.Matched {
-				continue
-			}
-			fmt.Printf(
-				"    %s: absDiff=%.12g B/day relDiff=%.2f%% allowed=%.12g B/day basis=%s reason=%s\n",
-				row.Name,
-				row.AbsDiff,
-				row.RelDiffPct,
-				row.AllowedDiff,
-				row.ToleranceBasis,
-				row.Reason,
-			)
+}
+
+func printGrowthComparisonMismatches(rows []civerify.ComparisonRow) {
+	fmt.Println("  mismatches:")
+	for _, row := range rows {
+		if !row.HasPromData || row.Matched {
+			continue
 		}
+		fmt.Printf(
+			"    %s: absDiff=%.12g B/day relDiff=%.2f%% allowed=%.12g B/day basis=%s reason=%s\n",
+			row.Name,
+			row.AbsDiff,
+			row.RelDiffPct,
+			row.AllowedDiff,
+			row.ToleranceBasis,
+			row.Reason,
+		)
+	}
+}
+
+func (r *IntegrationRunner) printGrowthInterpretation(
+	cpGrowth []civerify.PVCGrowth,
+	summary civerify.ComparisonSummary,
+	opts civerify.CompareOptions,
+) {
+	if len(cpGrowth) == 0 {
+		return
+	}
+	minPerMin, maxPerMin, avgPerMin := statusGrowthStats(cpGrowth)
+	noData := len(summary.Rows) - summary.Comparable
+	rows := sortedComparisonRows(summary)
+	maxRelName, maxRelDiff := comparisonMaxRelDiff(rows)
+	fmt.Println("Growth interpretation")
+	fmt.Printf(
+		"  tolerances: relative=%.2f%% absolute=%.0f B/day (effective threshold per PVC: max(relative*scale, absolute))\n",
+		opts.RelativeTolerance*100.0,
+		opts.AbsToleranceBytesDay,
+	)
+	fmt.Printf("  status growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
+	fmt.Printf(
+		"  cross-check match: %d/%d comparable PVCs within tolerances (no-prom-data=%d, required comparable=%d, required matches=%d)\n",
+		summary.Matched,
+		summary.Comparable,
+		noData,
+		opts.MinComparablePVCs,
+		opts.MinMatchingPVCs,
+	)
+	printGrowthComparisonRowsTable(rows)
+	if summary.Matched < summary.Comparable {
+		printGrowthComparisonMismatches(rows)
 	}
 	if maxRelName != "" {
 		fmt.Printf("  largest status-vs-prometheus delta: %s (%.2f%%)\n", maxRelName, maxRelDiff)
 	}
 }
 
-func (r *IntegrationRunner) checkCapacityPlanPostConditions(ctx context.Context, firstReconcile *metav1.Time) error {
-	cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
-	if err != nil {
-		return fmt.Errorf("getting capacity plan: %w", err)
+func conditionStatus(conditions []metav1.Condition, condType string) string {
+	for _, cond := range conditions {
+		if cond.Type == condType {
+			return string(cond.Status)
+		}
 	}
+	return ""
+}
+
+func validateCapacityPlanConditions(cp *capacityv1.CapacityPlan, firstReconcile *metav1.Time) error {
 	if cp.Status.LastReconcileTime == nil {
 		return fmt.Errorf("capacity plan has empty status.lastReconcileTime")
 	}
 	if firstReconcile != nil && cp.Status.LastReconcileTime.Equal(firstReconcile) {
 		return fmt.Errorf("capacity plan lastReconcileTime did not advance during trend observation")
 	}
-
-	ready := ""
-	promReady := ""
-	for _, cond := range cp.Status.Conditions {
-		if cond.Type == "Ready" {
-			ready = string(cond.Status)
-		}
-		if cond.Type == "PrometheusReady" {
-			promReady = string(cond.Status)
-		}
-	}
-	if ready != "True" {
+	if ready := conditionStatus(cp.Status.Conditions, "Ready"); ready != "True" {
 		return fmt.Errorf("Ready condition is not True (got %q)", ready)
 	}
-	if promReady != "True" {
+	if promReady := conditionStatus(cp.Status.Conditions, "PrometheusReady"); promReady != "True" {
 		return fmt.Errorf("PrometheusReady condition is not True (got %q)", promReady)
 	}
+	return nil
+}
+
+func validateCapacityPlanStatusContent(cp *capacityv1.CapacityPlan) error {
 	if cp.Status.Summary.TotalPVCs < 5 {
 		return fmt.Errorf("expected at least five PVCs in summary, got %d", cp.Status.Summary.TotalPVCs)
 	}
@@ -1000,6 +1091,20 @@ func (r *IntegrationRunner) checkCapacityPlanPostConditions(ctx context.Context,
 	}
 	if len(cp.Status.WorkloadForecasts) == 0 || cp.Status.WorkloadForecasts[0].Scope != "workload" {
 		return fmt.Errorf("expected first workload forecast scope=workload")
+	}
+	return nil
+}
+
+func (r *IntegrationRunner) checkCapacityPlanPostConditions(ctx context.Context, firstReconcile *metav1.Time) error {
+	cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
+	if err != nil {
+		return fmt.Errorf("getting capacity plan: %w", err)
+	}
+	if err := validateCapacityPlanConditions(cp, firstReconcile); err != nil {
+		return err
+	}
+	if err := validateCapacityPlanStatusContent(cp); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1122,107 +1227,165 @@ func (r *IntegrationRunner) verifyAlerts(ctx context.Context) error {
 	return nil
 }
 
+type trendObservation struct {
+	remaining       int
+	snapshots       int
+	maxGrowing      int
+	sawNonzeroUsage bool
+	lastCP          *capacityv1.CapacityPlan
+}
+
+func newTrendObservation(totalSeconds int) trendObservation {
+	if totalSeconds <= 0 {
+		totalSeconds = 1
+	}
+	return trendObservation{remaining: totalSeconds}
+}
+
+func (r *IntegrationRunner) trendIntervalSeconds(remaining int) int {
+	interval := r.cfg.UsageSnapshotInterval
+	if interval <= 0 {
+		interval = 60
+	}
+	if interval > remaining {
+		interval = remaining
+	}
+	return interval
+}
+
+func (r *IntegrationRunner) captureTrendSnapshot(ctx context.Context, pvcs []string, obs *trendObservation) error {
+	interval := r.trendIntervalSeconds(obs.remaining)
+	time.Sleep(time.Duration(interval) * time.Second)
+	obs.remaining -= interval
+	obs.snapshots++
+	fmt.Printf("  snapshot=%d elapsed=%ds remaining=%ds\n", obs.snapshots, int(time.Since(r.state.obsStartedAt).Seconds()), obs.remaining)
+
+	cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
+	if err != nil {
+		return fmt.Errorf("getting capacity plan during observation: %w", err)
+	}
+	obs.lastCP = cp
+	r.printCapacitySnapshot(cp)
+	r.printGrowthSummary(cp)
+	if mismatchCount := r.printPrometheusPVCRawSnapshot(ctx, pvcs); mismatchCount > 0 {
+		r.state.sawCapacityToRequestMismatch = true
+	}
+
+	growing := r.countGrowingPVCs(cp)
+	fmt.Printf("  growingPVCsAboveThreshold=%d thresholdBytesPerMin=%.0f\n", growing, r.cfg.MinGrowthBytesPerMin)
+	if growing > obs.maxGrowing {
+		obs.maxGrowing = growing
+	}
+	if r.hasNonzeroUsage(cp) || r.hasPrometheusNonzeroUsage(ctx, pvcs) {
+		obs.sawNonzeroUsage = true
+	}
+	if r.prometheusHasCapacityAlerts(ctx) {
+		r.state.sawCapacityAlerts = true
+	}
+	if r.hasInvalidUsageRatio(cp) {
+		raw, _ := json.MarshalIndent(cp, "", "  ")
+		fmt.Println(string(raw))
+		return fmt.Errorf("capacity plan usage ratio exceeded sanity limit (%.4f)", r.cfg.UsageRatioSanityMax)
+	}
+	return nil
+}
+
+func (r *IntegrationRunner) shouldStopTrendObservation(obs trendObservation) (bool, int) {
+	obsElapsed := int(time.Since(r.state.obsStartedAt).Seconds())
+	shouldStop := obs.remaining > 0 &&
+		obs.snapshots >= r.cfg.MinTrendSnapshots &&
+		obsElapsed >= r.cfg.MinTrendObserveSeconds &&
+		obs.sawNonzeroUsage &&
+		obs.maxGrowing >= r.cfg.MinGrowingPVCs
+	return shouldStop, obsElapsed
+}
+
+func (r *IntegrationRunner) printTrendInterpretation(cp *capacityv1.CapacityPlan, snapshots, maxGrowing int) {
+	if cp == nil || len(cp.Status.PVCs) == 0 {
+		return
+	}
+	minPerMin := cp.Status.PVCs[0].GrowthBytesPerDay / 1440.0
+	maxPerMin := minPerMin
+	sumPerMin := 0.0
+	for _, pvc := range cp.Status.PVCs {
+		v := pvc.GrowthBytesPerDay / 1440.0
+		sumPerMin += v
+		if v < minPerMin {
+			minPerMin = v
+		}
+		if v > maxPerMin {
+			maxPerMin = v
+		}
+	}
+	avgPerMin := sumPerMin / float64(len(cp.Status.PVCs))
+	fmt.Println("Trend interpretation")
+	fmt.Printf("  sampled snapshots: %d\n", snapshots)
+	fmt.Printf("  growing PVCs above threshold: %d/%d (threshold %.0f bytes/min)\n", maxGrowing, len(cp.Status.PVCs), r.cfg.MinGrowthBytesPerMin)
+	fmt.Printf("  latest growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
+}
+
+func (r *IntegrationRunner) finalizeTrendObservation(obs trendObservation) error {
+	if !obs.sawNonzeroUsage {
+		return fmt.Errorf("all PVC usedBytes remained 0 throughout trend observation; no growth signal detected from metrics")
+	}
+	if obs.maxGrowing < r.cfg.MinGrowingPVCs {
+		return fmt.Errorf("peak growing PVC count was %d; required at least %d PVCs above %.0f bytes/min", obs.maxGrowing, r.cfg.MinGrowingPVCs, r.cfg.MinGrowthBytesPerMin)
+	}
+	r.state.obsFinishedAt = time.Now()
+	r.state.snapshots = obs.snapshots
+	r.state.maxGrowingPVCs = obs.maxGrowing
+	r.printTrendInterpretation(obs.lastCP, obs.snapshots, obs.maxGrowing)
+	r.state.checkTrendSignal = fmt.Sprintf("pass (nonzeroUsage=1, peakGrowingPVCs=%d)", obs.maxGrowing)
+	return nil
+}
+
 func (r *IntegrationRunner) observeTrends(ctx context.Context) error {
 	logStep(fmt.Sprintf("Observing storage trends for %ds", r.cfg.TrendObserveSeconds))
 	r.state.obsStartedAt = time.Now()
-	remaining := r.cfg.TrendObserveSeconds
-	if remaining <= 0 {
-		remaining = 1
-	}
 	pvcs := pvcNames(r.cfg.CIWorkloads)
-	sawNonzeroUsage := false
-	maxGrowing := 0
-	snapshots := 0
-	var lastCP *capacityv1.CapacityPlan
-	for remaining > 0 {
-		interval := r.cfg.UsageSnapshotInterval
-		if interval <= 0 {
-			interval = 60
-		}
-		if interval > remaining {
-			interval = remaining
-		}
-		time.Sleep(time.Duration(interval) * time.Second)
-		remaining -= interval
-		snapshots++
-		fmt.Printf("  snapshot=%d elapsed=%ds remaining=%ds\n", snapshots, int(time.Since(r.state.obsStartedAt).Seconds()), remaining)
+	obs := newTrendObservation(r.cfg.TrendObserveSeconds)
 
-		cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
-		if err != nil {
-			return fmt.Errorf("getting capacity plan during observation: %w", err)
+	for obs.remaining > 0 {
+		if err := r.captureTrendSnapshot(ctx, pvcs, &obs); err != nil {
+			return err
 		}
-		lastCP = cp
-		r.printCapacitySnapshot(cp)
-		r.printGrowthSummary(cp)
-		mismatchCount := r.printPrometheusPVCRawSnapshot(ctx, pvcs)
-		if mismatchCount > 0 {
-			r.state.sawCapacityToRequestMismatch = true
-		}
-
-		growing := r.countGrowingPVCs(cp)
-		fmt.Printf("  growingPVCsAboveThreshold=%d thresholdBytesPerMin=%.0f\n", growing, r.cfg.MinGrowthBytesPerMin)
-		if growing > maxGrowing {
-			maxGrowing = growing
-		}
-		if r.hasNonzeroUsage(cp) || r.hasPrometheusNonzeroUsage(ctx, pvcs) {
-			sawNonzeroUsage = true
-		}
-		if r.prometheusHasCapacityAlerts(ctx) {
-			r.state.sawCapacityAlerts = true
-		}
-		if r.hasInvalidUsageRatio(cp) {
-			raw, _ := json.MarshalIndent(cp, "", "  ")
-			fmt.Println(string(raw))
-			return fmt.Errorf("capacity plan usage ratio exceeded sanity limit (%.4f)", r.cfg.UsageRatioSanityMax)
-		}
-
-		obsElapsed := int(time.Since(r.state.obsStartedAt).Seconds())
-		if remaining > 0 &&
-			snapshots >= r.cfg.MinTrendSnapshots &&
-			obsElapsed >= r.cfg.MinTrendObserveSeconds &&
-			sawNonzeroUsage &&
-			maxGrowing >= r.cfg.MinGrowingPVCs {
-			fmt.Printf("  earlyStop=true reason=trend-signals-confirmed elapsed=%ds snapshots=%d\n", obsElapsed, snapshots)
+		if stop, elapsed := r.shouldStopTrendObservation(obs); stop {
+			fmt.Printf("  earlyStop=true reason=trend-signals-confirmed elapsed=%ds snapshots=%d\n", elapsed, obs.snapshots)
 			break
 		}
 	}
-	if !sawNonzeroUsage {
-		return fmt.Errorf("all PVC usedBytes remained 0 throughout trend observation; no growth signal detected from metrics")
-	}
-	if maxGrowing < r.cfg.MinGrowingPVCs {
-		return fmt.Errorf("peak growing PVC count was %d; required at least %d PVCs above %.0f bytes/min", maxGrowing, r.cfg.MinGrowingPVCs, r.cfg.MinGrowthBytesPerMin)
-	}
-	r.state.obsFinishedAt = time.Now()
-	r.state.snapshots = snapshots
-	r.state.maxGrowingPVCs = maxGrowing
-	if lastCP != nil && len(lastCP.Status.PVCs) > 0 {
-		sumPerMin := 0.0
-		minPerMin := lastCP.Status.PVCs[0].GrowthBytesPerDay / 1440.0
-		maxPerMin := minPerMin
-		for _, pvc := range lastCP.Status.PVCs {
-			v := pvc.GrowthBytesPerDay / 1440.0
-			sumPerMin += v
-			if v < minPerMin {
-				minPerMin = v
-			}
-			if v > maxPerMin {
-				maxPerMin = v
-			}
-		}
-		avgPerMin := sumPerMin / float64(len(lastCP.Status.PVCs))
-		fmt.Println("Trend interpretation")
-		fmt.Printf("  sampled snapshots: %d\n", snapshots)
-		fmt.Printf("  growing PVCs above threshold: %d/%d (threshold %.0f bytes/min)\n", maxGrowing, len(lastCP.Status.PVCs), r.cfg.MinGrowthBytesPerMin)
-		fmt.Printf("  latest growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
-	}
-	r.state.checkTrendSignal = fmt.Sprintf("pass (nonzeroUsage=1, peakGrowingPVCs=%d)", maxGrowing)
-	return nil
+	return r.finalizeTrendObservation(obs)
 }
 
 func (r *IntegrationRunner) Run(ctx context.Context) error {
 	defer r.closePortForwards()
 	defer r.renderValidationReport()
 
+	if err := r.validateContext(); err != nil {
+		return err
+	}
+	if err := r.setupMonitoring(ctx); err != nil {
+		return err
+	}
+	if err := r.deployOperator(ctx); err != nil {
+		return err
+	}
+	firstReconcile, err := r.deployWorkloadAndPlan(ctx)
+	if err != nil {
+		return err
+	}
+	if err := r.runTrendAndPolicyChecks(ctx, firstReconcile); err != nil {
+		return err
+	}
+	if err := r.verifyAlertPipeline(ctx); err != nil {
+		return err
+	}
+
+	logStep("K3s integration checks passed")
+	return nil
+}
+
+func (r *IntegrationRunner) validateContext() error {
 	logStep("Validating kubectl context")
 	if strings.TrimSpace(r.clients.CurrentContext) == "" {
 		return fmt.Errorf("kube current context is empty")
@@ -1231,7 +1394,10 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 		return fmt.Errorf("kubectl context mismatch: expected %s, got %s", r.cfg.ExpectedKubeContext, r.clients.CurrentContext)
 	}
 	r.state.checkContext = fmt.Sprintf("pass (%s)", r.clients.CurrentContext)
+	return nil
+}
 
+func (r *IntegrationRunner) setupMonitoring(ctx context.Context) error {
 	logStep("Installing kube-prometheus-stack")
 	if err := r.installKubePrometheusStack(ctx); err != nil {
 		return err
@@ -1259,7 +1425,10 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 		return err
 	}
 	r.state.checkPromEndpoint = "pass"
+	return nil
+}
 
+func (r *IntegrationRunner) deployOperator(ctx context.Context) error {
 	logStep("Deploying operator manifests")
 	if err := ApplyOperatorManifests(ctx, r.clients); err != nil {
 		return err
@@ -1275,47 +1444,55 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 		return err
 	}
 	r.state.checkManagerRollout = "pass"
+	return nil
+}
 
+func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.Time, error) {
 	logStep("Creating PVC workload and CapacityPlan")
 	if err := ApplyWorkloadStorageManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
-		return err
+		return nil, err
 	}
+
+	pvcList := pvcNames(r.cfg.CIWorkloads)
 	provisionNode, err := r.selectProvisioningNode(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logStep(fmt.Sprintf("Pinning CI PVCs to node %s for provisioning", provisionNode))
-	if err := r.annotatePVCSelectedNode(ctx, "default", pvcNames(r.cfg.CIWorkloads), provisionNode); err != nil {
-		return err
+	if err := r.annotatePVCSelectedNode(ctx, "default", pvcList, provisionNode); err != nil {
+		return nil, err
 	}
-	if err := waitForPVCsBound(ctx, r.clients, "default", pvcNames(r.cfg.CIWorkloads), 5*time.Minute, r.cfg.PollInterval()); err != nil {
-		return err
+	if err := waitForPVCsBound(ctx, r.clients, "default", pvcList, 5*time.Minute, r.cfg.PollInterval()); err != nil {
+		return nil, err
 	}
 	logStep("Preparing dedicated PVC backends for kubelet volume metrics")
-	mounts, err := r.resolvePVCBackendMounts(ctx, "default", pvcNames(r.cfg.CIWorkloads))
+	mounts, err := r.resolvePVCBackendMounts(ctx, "default", pvcList)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.prepareDedicatedPVCBackends(ctx, mounts); err != nil {
-		return err
+		return nil, err
 	}
 	if err := ApplyWorkloadPodManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
-		return err
+		return nil, err
 	}
 	if err := waitForPodsScheduled(ctx, r.clients, "default", r.cfg.CIWorkloads, 3*time.Minute, r.cfg.PollInterval()); err != nil {
-		return err
+		return nil, err
 	}
 	if err := ApplyCapacityPlan(ctx, r.clients, r.cfg); err != nil {
-		return err
+		return nil, err
 	}
 
 	logStep("Waiting for CapacityPlan reconciliation")
 	firstReconcile, err := waitForCapacityPlanReconcile(ctx, r.clients, r.cfg.PlanName, 5*time.Minute, r.cfg.PollInterval())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r.state.checkPlanReconcile = "pass"
+	return firstReconcile, nil
+}
 
+func (r *IntegrationRunner) runTrendAndPolicyChecks(ctx context.Context, firstReconcile *metav1.Time) error {
 	if err := r.observeTrends(ctx); err != nil {
 		return err
 	}
@@ -1340,19 +1517,17 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 		return err
 	}
 	r.state.checkManagerMetrics = "pass"
+	return nil
+}
 
+func (r *IntegrationRunner) verifyAlertPipeline(ctx context.Context) error {
 	logStep("Checking Alertmanager readiness endpoint")
 	if err := r.startAlertmanagerPortForward(ctx); err != nil {
 		return err
 	}
 
 	logStep("Verifying alert pipeline (Prometheus + workload + Alertmanager)")
-	if err := r.verifyAlerts(ctx); err != nil {
-		return err
-	}
-
-	logStep("K3s integration checks passed")
-	return nil
+	return r.verifyAlerts(ctx)
 }
 
 func CapacityPlanYAML(ctx context.Context, c *Clients, planName string) (string, error) {
