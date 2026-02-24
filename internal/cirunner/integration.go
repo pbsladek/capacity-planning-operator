@@ -204,17 +204,22 @@ func (r *IntegrationRunner) resolvePVCBackendMounts(ctx context.Context, namespa
 		if err != nil {
 			return nil, fmt.Errorf("getting pv %s for pvc %s/%s: %w", pvc.Spec.VolumeName, namespace, pvcName, err)
 		}
-		if pv.Spec.HostPath == nil || strings.TrimSpace(pv.Spec.HostPath.Path) == "" {
-			return nil, fmt.Errorf("pv %s for pvc %s/%s is not hostPath-backed", pv.Name, namespace, pvcName)
+		backendPath := ""
+		switch {
+		case pv.Spec.HostPath != nil && strings.TrimSpace(pv.Spec.HostPath.Path) != "":
+			backendPath = strings.TrimSpace(pv.Spec.HostPath.Path)
+		case pv.Spec.Local != nil && strings.TrimSpace(pv.Spec.Local.Path) != "":
+			backendPath = strings.TrimSpace(pv.Spec.Local.Path)
+		default:
+			return nil, fmt.Errorf("pv %s for pvc %s/%s is not hostPath/local-backed", pv.Name, namespace, pvcName)
 		}
-		hostPath := strings.TrimSpace(pv.Spec.HostPath.Path)
-		if owner, exists := pathOwner[hostPath]; exists && owner != pvcName {
+		if owner, exists := pathOwner[backendPath]; exists && owner != pvcName {
 			return nil, fmt.Errorf(
-				"duplicate hostPath backend %q resolved for pvc %s and pvc %s; each PVC must have a unique backend path",
-				hostPath, owner, pvcName,
+				"duplicate PV backend path %q resolved for pvc %s and pvc %s; each PVC must have a unique backend path",
+				backendPath, owner, pvcName,
 			)
 		}
-		pathOwner[hostPath] = pvcName
+		pathOwner[backendPath] = pvcName
 		targetNode := ""
 		if pv.Spec.NodeAffinity != nil && pv.Spec.NodeAffinity.Required != nil {
 			for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
@@ -229,7 +234,7 @@ func (r *IntegrationRunner) resolvePVCBackendMounts(ctx context.Context, namespa
 				}
 			}
 		}
-		mounts = append(mounts, pvcBackendMount{NodeName: targetNode, Path: hostPath})
+		mounts = append(mounts, pvcBackendMount{NodeName: targetNode, Path: backendPath})
 	}
 	return mounts, nil
 }
