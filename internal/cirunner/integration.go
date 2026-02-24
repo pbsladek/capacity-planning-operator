@@ -143,6 +143,34 @@ type pvcBackendMount struct {
 	Path     string
 }
 
+func (r *IntegrationRunner) selectProvisioningNode(ctx context.Context) (string, error) {
+	nodes, err := discoverK3DNodes(ctx, r.cfg.ClusterName)
+	if err != nil {
+		return "", fmt.Errorf("discovering k3d nodes: %w", err)
+	}
+	if len(nodes) == 0 {
+		return "", fmt.Errorf("no k3d nodes discovered for cluster %s", r.cfg.ClusterName)
+	}
+	// Use the first discovered node; PVCs are CI-only test assets.
+	return nodes[0], nil
+}
+
+func (r *IntegrationRunner) annotatePVCSelectedNode(ctx context.Context, namespace string, pvcNames []string, nodeName string) error {
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"volume.kubernetes.io/selected-node":%q}}}`, nodeName)
+	for _, pvcName := range pvcNames {
+		if _, err := r.clients.Clientset.CoreV1().PersistentVolumeClaims(namespace).Patch(
+			ctx,
+			pvcName,
+			types.MergePatchType,
+			[]byte(patch),
+			metav1.PatchOptions{},
+		); err != nil {
+			return fmt.Errorf("annotating pvc %s/%s with selected node %s: %w", namespace, pvcName, nodeName, err)
+		}
+	}
+	return nil
+}
+
 func uniqueStrings(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
@@ -925,6 +953,14 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 
 	logStep("Creating PVC workload and CapacityPlan")
 	if err := ApplyWorkloadStorageManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
+		return err
+	}
+	provisionNode, err := r.selectProvisioningNode(ctx)
+	if err != nil {
+		return err
+	}
+	logStep(fmt.Sprintf("Pinning CI PVCs to node %s for provisioning", provisionNode))
+	if err := r.annotatePVCSelectedNode(ctx, "default", pvcNames(r.cfg.CIWorkloads), provisionNode); err != nil {
 		return err
 	}
 	if err := waitForPVCsBound(ctx, r.clients, "default", pvcNames(r.cfg.CIWorkloads), 5*time.Minute, r.cfg.PollInterval()); err != nil {

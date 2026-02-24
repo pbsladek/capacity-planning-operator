@@ -240,7 +240,6 @@ func ApplyWorkloadStorageManifests(ctx context.Context, c *Clients, manifestDir 
 	mapper := c.DiscoveryMapper()
 	workloadsDir := filepath.Join(manifestDir, "workloads")
 	files := []string{
-		filepath.Join(workloadsDir, "storageclass-ci-local-path.yaml"),
 		filepath.Join(workloadsDir, "pvc-steady.yaml"),
 		filepath.Join(workloadsDir, "pvc-bursty.yaml"),
 		filepath.Join(workloadsDir, "pvc-trickle.yaml"),
