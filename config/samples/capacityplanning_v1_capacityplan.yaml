@@ -40,7 +40,7 @@ spec:
 
   # LLM insight provider configuration.
   llm:
-    # disabled | openai | anthropic | fastapi
+    # disabled | openai | anthropic | fastapi | ollama
     provider: "disabled"
     # Optional model identifier (provider-specific).
     model: ""
@@ -80,6 +80,11 @@ spec:
       failureThreshold: 3
       # How long to stay degraded before retrying via health check.
       cooldown: "1m"
+
+    # In-cluster Ollama service.
+    ollama:
+      # Example: http://ollama.llm.svc.cluster.local:11434
+      url: ""
 
   # Namespace where the Grafana dashboard ConfigMap is created.
   # Defaults to "default" if not set.

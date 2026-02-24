@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	capacityv1 "github.com/pbsladek/capacity-planning-operator/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
@@ -236,6 +237,16 @@ func ApplyWorkloadManifests(ctx context.Context, c *Clients, manifestDir string)
 	return ApplyWorkloadPodManifests(ctx, c, manifestDir)
 }
 
+func ApplyAlertReceiverManifests(ctx context.Context, c *Clients, manifestDir string) error {
+	mapper := c.DiscoveryMapper()
+	receiverDir := filepath.Join(manifestDir, "alert-receiver")
+	files := []string{
+		filepath.Join(receiverDir, "service.yaml"),
+		filepath.Join(receiverDir, "deployment.yaml"),
+	}
+	return applyFiles(ctx, c, mapper, files, nil)
+}
+
 func ApplyWorkloadStorageManifests(ctx context.Context, c *Clients, manifestDir string) error {
 	mapper := c.DiscoveryMapper()
 	workloadsDir := filepath.Join(manifestDir, "workloads")
@@ -262,7 +273,62 @@ func ApplyWorkloadPodManifests(ctx context.Context, c *Clients, manifestDir stri
 	return applyFiles(ctx, c, mapper, files, nil)
 }
 
+func ApplyLLMManifests(ctx context.Context, c *Clients, manifestDir string, cfg Config) error {
+	if !cfg.LLMEnabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.LLMProvider) != "ollama" {
+		return nil
+	}
+
+	mapper := c.DiscoveryMapper()
+	files := []string{
+		filepath.Join(manifestDir, "llm", "ollama.yaml"),
+	}
+	transform := func(obj *unstructured.Unstructured) {
+		if obj.GetKind() == "Namespace" {
+			obj.SetName(cfg.LLMNamespace)
+			return
+		}
+		obj.SetNamespace(cfg.LLMNamespace)
+		if obj.GetKind() == "Deployment" && obj.GetName() != "" {
+			obj.SetName(cfg.LLMDeploymentName)
+		}
+		if obj.GetKind() == "Service" && obj.GetName() != "" {
+			obj.SetName(cfg.LLMDeploymentName)
+		}
+	}
+	return applyFiles(ctx, c, mapper, files, transform)
+}
+
 func ApplyCapacityPlan(ctx context.Context, c *Clients, cfg Config) error {
+	llmProvider := "disabled"
+	if cfg.LLMEnabled {
+		llmProvider = strings.TrimSpace(cfg.LLMProvider)
+		if llmProvider == "" {
+			llmProvider = "ollama"
+		}
+	}
+
+	llmSpec := capacityv1.LLMProviderSpec{
+		Provider: llmProvider,
+	}
+	if llmProvider != "disabled" {
+		llmSpec.Model = strings.TrimSpace(cfg.LLMModel)
+		if cfg.LLMTimeoutSeconds > 0 {
+			llmSpec.Timeout = metav1.Duration{Duration: time.Duration(cfg.LLMTimeoutSeconds) * time.Second}
+		}
+		if cfg.LLMMaxTokens > 0 {
+			llmSpec.MaxTokens = cfg.LLMMaxTokens
+		}
+		llmSpec.OnlyAlertingPVCs = cfg.LLMOnlyAlertingPVCs
+		if llmProvider == "ollama" {
+			llmSpec.Ollama = capacityv1.OllamaProviderSpec{
+				URL: strings.TrimSpace(cfg.LLMOllamaURL),
+			}
+		}
+	}
+
 	plan := capacityv1.CapacityPlan{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "capacityplanning.pbsladek.io/v1",
@@ -293,9 +359,7 @@ func ApplyCapacityPlan(ctx context.Context, c *Clients, cfg Config) error {
 					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-delayed", Budget: "160Mi"},
 				},
 			},
-			LLM: capacityv1.LLMProviderSpec{
-				Provider: "disabled",
-			},
+			LLM: llmSpec,
 		},
 	}
 

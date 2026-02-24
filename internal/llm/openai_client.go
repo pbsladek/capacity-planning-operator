@@ -44,10 +44,15 @@ func NewOpenAIInsightGenerator(cfg ProviderConfig) (InsightGenerator, error) {
 }
 
 func (g *OpenAIInsightGenerator) GenerateInsight(ctx context.Context, pvc PVCContext) (string, error) {
+	return g.GenerateFromPrompt(ctx, BuildPromptParts(pvc))
+}
+
+func (g *OpenAIInsightGenerator) GenerateFromPrompt(ctx context.Context, parts PromptParts) (string, error) {
 	params := responses.ResponseNewParams{
-		Model: shared.ResponsesModel(g.model),
+		Model:        shared.ResponsesModel(g.model),
+		Instructions: openai.String(parts.System),
 		Input: responses.ResponseNewParamsInputUnion{
-			OfString: openai.String(BuildPrompt(pvc)),
+			OfString: openai.String(parts.User),
 		},
 		MaxOutputTokens: openai.Int(int64(g.maxTokens)),
 	}

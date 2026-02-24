@@ -19,6 +19,9 @@ func TestPrintValidationReport(t *testing.T) {
 		GrowthMathCrosscheck:       "pass",
 		PromRuleContent:            "pass",
 		ManagerMetrics:             "pass",
+		LLMInsights:                "pass",
+		LLMRiskChangeSummary:       "Most likely driver: burst writes from cpo-ci-bursty.",
+		LLMBudgetRecommendations:   "1) Check default namespace budget in 24h.",
 		PrometheusCapacityAlerts:   "pass",
 		WorkloadBudgetAlerts:       "pass",
 		AlertmanagerCapacityAlerts: "pass",
@@ -33,6 +36,12 @@ func TestPrintValidationReport(t *testing.T) {
 	}
 	if !strings.Contains(out, "timings: trend=6m02s total=7m23s") {
 		t.Fatalf("unexpected timing formatting: %s", out)
+	}
+	if !strings.Contains(out, "llm_risk_change_summary:") {
+		t.Fatalf("missing llm risk change summary: %s", out)
+	}
+	if !strings.Contains(out, "llm_budget_recommendations:") {
+		t.Fatalf("missing llm budget recommendations: %s", out)
 	}
 }
 

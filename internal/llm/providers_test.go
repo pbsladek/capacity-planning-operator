@@ -59,3 +59,16 @@ func TestNewInsightGenerator_FastAPIMissingURL(t *testing.T) {
 		t.Fatalf("expected nil generator on error")
 	}
 }
+
+func TestNewInsightGenerator_OllamaMissingURL(t *testing.T) {
+	gen, err := NewInsightGenerator(ProviderConfig{
+		Provider: ProviderOllama,
+		Model:    "mistral:7b",
+	})
+	if err == nil {
+		t.Fatalf("expected error for missing Ollama URL")
+	}
+	if gen != nil {
+		t.Fatalf("expected nil generator on error")
+	}
+}

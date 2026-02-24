@@ -42,11 +42,18 @@ func NewAnthropicInsightGenerator(cfg ProviderConfig) (InsightGenerator, error) 
 }
 
 func (g *AnthropicInsightGenerator) GenerateInsight(ctx context.Context, pvc PVCContext) (string, error) {
+	return g.GenerateFromPrompt(ctx, BuildPromptParts(pvc))
+}
+
+func (g *AnthropicInsightGenerator) GenerateFromPrompt(ctx context.Context, parts PromptParts) (string, error) {
 	req := anthropic.MessageNewParams{
 		Model:     g.model,
 		MaxTokens: int64(g.maxTokens),
+		System: []anthropic.TextBlockParam{
+			{Text: parts.System},
+		},
 		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(BuildPrompt(pvc))),
+			anthropic.NewUserMessage(anthropic.NewTextBlock(parts.User)),
 		},
 	}
 	if g.temperature != nil {
@@ -58,13 +65,13 @@ func (g *AnthropicInsightGenerator) GenerateInsight(ctx context.Context, pvc PVC
 		return "", err
 	}
 
-	parts := make([]string, 0, len(resp.Content))
+	segments := make([]string, 0, len(resp.Content))
 	for _, block := range resp.Content {
 		if strings.TrimSpace(block.Type) == "text" && strings.TrimSpace(block.Text) != "" {
-			parts = append(parts, block.Text)
+			segments = append(segments, block.Text)
 		}
 	}
-	text := strings.TrimSpace(strings.Join(parts, "\n"))
+	text := strings.TrimSpace(strings.Join(segments, "\n"))
 	if text == "" {
 		return "", errors.New("anthropic returned empty insight")
 	}

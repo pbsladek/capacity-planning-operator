@@ -10,6 +10,7 @@ const (
 	ProviderOpenAI    = "openai"
 	ProviderAnthropic = "anthropic"
 	ProviderFastAPI   = "fastapi"
+	ProviderOllama    = "ollama"
 )
 
 const (
@@ -30,6 +31,7 @@ type ProviderConfig struct {
 	OpenAI    OpenAIConfig
 	Anthropic AnthropicConfig
 	FastAPI   FastAPIConfig
+	Ollama    OllamaConfig
 }
 
 // OpenAIConfig holds OpenAI-specific runtime settings.
@@ -52,6 +54,11 @@ type FastAPIConfig struct {
 	HealthURL        string
 	FailureThreshold int
 	Cooldown         time.Duration
+}
+
+// OllamaConfig holds Ollama-specific runtime settings.
+type OllamaConfig struct {
+	URL string
 }
 
 func (c *ProviderConfig) normalize() {
@@ -80,6 +87,8 @@ func NewInsightGenerator(cfg ProviderConfig) (InsightGenerator, error) {
 		return NewAnthropicInsightGenerator(cfg)
 	case ProviderFastAPI:
 		return NewFastAPIInsightGenerator(cfg)
+	case ProviderOllama:
+		return NewOllamaInsightGenerator(cfg)
 	default:
 		return nil, errors.New("unsupported llm provider: " + cfg.Provider)
 	}

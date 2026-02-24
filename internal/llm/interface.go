@@ -10,6 +10,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 
 	"github.com/pbsladek/capacity-planning-operator/internal/analysis"
 )
@@ -43,4 +44,25 @@ type InsightGenerator interface {
 	// On error, callers should preserve the previous insight and log a warning
 	// rather than failing the entire reconcile.
 	GenerateInsight(ctx context.Context, pvc PVCContext) (string, error)
+}
+
+var ErrPromptExecutionUnsupported = errors.New("llm provider does not support generic prompt execution")
+
+// PromptExecutor is an optional extension implemented by providers that can
+// execute arbitrary system/user prompt parts (used for plan-level insights).
+type PromptExecutor interface {
+	GenerateFromPrompt(ctx context.Context, prompt PromptParts) (string, error)
+}
+
+// GenerateFromPrompt executes generic prompt parts against an InsightGenerator
+// when the underlying provider supports PromptExecutor.
+func GenerateFromPrompt(ctx context.Context, gen InsightGenerator, prompt PromptParts) (string, error) {
+	if gen == nil {
+		return "", ErrPromptExecutionUnsupported
+	}
+	exec, ok := gen.(PromptExecutor)
+	if !ok {
+		return "", ErrPromptExecutionUnsupported
+	}
+	return exec.GenerateFromPrompt(ctx, prompt)
 }

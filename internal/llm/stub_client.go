@@ -9,6 +9,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // StubInsightGenerator returns deterministic placeholder text without making
@@ -44,5 +45,17 @@ func (s *StubInsightGenerator) GenerateInsight(_ context.Context, pvc PVCContext
 		pvc.Growth.GrowthBytesPerDay, pvc.Growth.ConfidenceR2,
 		daysStr,
 		alertStr,
+	), nil
+}
+
+// GenerateFromPrompt returns a deterministic placeholder for plan-level prompts.
+func (s *StubInsightGenerator) GenerateFromPrompt(_ context.Context, prompt PromptParts) (string, error) {
+	version := strings.TrimSpace(prompt.Version)
+	if version == "" {
+		version = "unknown"
+	}
+	return fmt.Sprintf(
+		"[stub insight: prompt version=%s, configure LLM provider for generated plan-level analysis]",
+		version,
 	), nil
 }

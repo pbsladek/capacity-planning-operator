@@ -13,6 +13,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -230,6 +231,44 @@ func (r *CapacityPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	riskChanges := detectRiskChanges(nowTime, prevTopRisks, topRisks)
 	riskChangeSummary := summarizeRiskChanges(riskChanges)
 	riskSnapshotHash := computeRiskSnapshotHash(topRisks)
+	llmRiskChangeSummary, lastLLMRiskChangeTime := r.refreshPlanRiskChangeInsight(
+		ctx,
+		plan.Name,
+		llmClientState{
+			client:    activeLLM,
+			provider:  llmProviderLabel,
+			model:     llmModelLabel,
+			interval:  llmInterval,
+			now:       nowTime,
+			prevHash:  plan.Status.RiskSnapshotHash,
+			currHash:  riskSnapshotHash,
+			prevText:  plan.Status.LLMRiskChangeSummary,
+			prevTime:  plan.Status.LastLLMRiskChangeTime,
+			isEnabled: activeLLM != nil,
+		},
+		riskChangeSummary,
+		riskChanges,
+		topRisks,
+	)
+	llmBudgetRecommendations, lastLLMBudgetRecommendationsTime := r.refreshPlanBudgetRecommendations(
+		ctx,
+		plan.Name,
+		llmClientState{
+			client:    activeLLM,
+			provider:  llmProviderLabel,
+			model:     llmModelLabel,
+			interval:  llmInterval,
+			now:       nowTime,
+			prevHash:  computeBudgetForecastHash(plan.Status.NamespaceForecasts, plan.Status.WorkloadForecasts),
+			currHash:  computeBudgetForecastHash(namespaceForecasts, workloadForecasts),
+			prevText:  plan.Status.LLMBudgetRecommendations,
+			prevTime:  plan.Status.LastLLMBudgetRecommendationsTime,
+			isEnabled: activeLLM != nil,
+		},
+		namespaceForecasts,
+		workloadForecasts,
+		topRisks,
+	)
 
 	// Update Prometheus gauges for each summary.
 	for _, s := range summaries {
@@ -294,9 +333,13 @@ func (r *CapacityPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	plan.Status.RiskDigest = riskDigest
 	plan.Status.RiskChanges = riskChanges
 	plan.Status.RiskChangeSummary = riskChangeSummary
+	plan.Status.LLMRiskChangeSummary = llmRiskChangeSummary
+	plan.Status.LastLLMRiskChangeTime = lastLLMRiskChangeTime
 	plan.Status.RiskSnapshotHash = riskSnapshotHash
 	plan.Status.NamespaceForecasts = namespaceForecasts
 	plan.Status.WorkloadForecasts = workloadForecasts
+	plan.Status.LLMBudgetRecommendations = llmBudgetRecommendations
+	plan.Status.LastLLMBudgetRecommendationsTime = lastLLMBudgetRecommendationsTime
 	plan.Status.Anomalies = anomalies
 	plan.Status.AnomalySummary = anomalySummary
 	plan.Status.LastReconcileTime = &now
@@ -418,6 +461,9 @@ func (r *CapacityPlanReconciler) buildSummary(
 				Observe(time.Since(start).Seconds())
 			if err != nil {
 				opmetrics.LLMErrorsTotal.WithLabelValues(llmProviderLabel, llmModelLabel).Inc()
+				if isLLMTimeoutError(err) {
+					opmetrics.LLMTimeoutsTotal.WithLabelValues(llmProviderLabel, llmModelLabel).Inc()
+				}
 				logger.V(1).Info("LLM insight generation failed, keeping previous", "pvc", key, "error", err)
 			} else {
 				insight = newInsight
@@ -443,6 +489,239 @@ func (r *CapacityPlanReconciler) buildSummary(
 		LastLLMTime:       lastLLMTime,
 		AlertFiring:       alertFiring,
 	}
+}
+
+type llmClientState struct {
+	client    llm.InsightGenerator
+	provider  string
+	model     string
+	interval  time.Duration
+	now       time.Time
+	prevHash  string
+	currHash  string
+	prevText  string
+	prevTime  *metav1.Time
+	isEnabled bool
+}
+
+func (s llmClientState) shouldRefresh() bool {
+	if !s.isEnabled || s.client == nil {
+		return false
+	}
+	if strings.TrimSpace(s.prevHash) != strings.TrimSpace(s.currHash) {
+		return true
+	}
+	if s.prevTime == nil {
+		return true
+	}
+	if s.interval <= 0 {
+		return true
+	}
+	return s.now.Sub(s.prevTime.Time) >= s.interval
+}
+
+func supportsPromptExecution(gen llm.InsightGenerator) bool {
+	_, ok := gen.(llm.PromptExecutor)
+	return ok
+}
+
+func planDurationString(v *float64) string {
+	if v == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2f", *v)
+}
+
+func planTimeString(v *metav1.Time) string {
+	if v == nil {
+		return "n/a"
+	}
+	return v.UTC().Format(time.RFC3339)
+}
+
+func toPlanTopRisks(topRisks []capacityv1.PVCRiskSummary, limit int) []llm.PlanTopRisk {
+	if limit <= 0 {
+		limit = len(topRisks)
+	}
+	out := make([]llm.PlanTopRisk, 0, min(limit, len(topRisks)))
+	for i := 0; i < len(topRisks) && i < limit; i++ {
+		risk := topRisks[i]
+		out = append(out, llm.PlanTopRisk{
+			Namespace:       risk.Namespace,
+			Name:            risk.Name,
+			WeeklyGiBPerDay: risk.WeeklyGrowthBytesPerDay / float64(1024*1024*1024),
+			UsageRatio:      risk.UsageRatio,
+			DaysUntilFull:   planDurationString(risk.DaysUntilFull),
+			AlertFiring:     risk.AlertFiring,
+		})
+	}
+	return out
+}
+
+func toPlanRiskChanges(changes []capacityv1.PVCRiskChange, limit int) []llm.PlanRiskChange {
+	if limit <= 0 {
+		limit = len(changes)
+	}
+	out := make([]llm.PlanRiskChange, 0, min(limit, len(changes)))
+	for i := 0; i < len(changes) && i < limit; i++ {
+		change := changes[i]
+		out = append(out, llm.PlanRiskChange{
+			Type:                    change.Type,
+			Namespace:               change.Namespace,
+			Name:                    change.Name,
+			PreviousWeeklyGiBPerDay: change.PreviousWeeklyGrowthBytesPerDay / float64(1024*1024*1024),
+			CurrentWeeklyGiBPerDay:  change.CurrentWeeklyGrowthBytesPerDay / float64(1024*1024*1024),
+			PreviousProjectedFullAt: planTimeString(change.PreviousProjectedFullAt),
+			CurrentProjectedFullAt:  planTimeString(change.CurrentProjectedFullAt),
+			Message:                 strings.TrimSpace(change.Message),
+		})
+	}
+	return out
+}
+
+func toPlanBudgetForecasts(forecasts []capacityv1.StorageBudgetForecast, limit int) []llm.PlanBudgetForecast {
+	if limit <= 0 {
+		limit = len(forecasts)
+	}
+	out := make([]llm.PlanBudgetForecast, 0, min(limit, len(forecasts)))
+	for i := 0; i < len(forecasts) && i < limit; i++ {
+		forecast := forecasts[i]
+		out = append(out, llm.PlanBudgetForecast{
+			Namespace:       forecast.Namespace,
+			Kind:            forecast.Kind,
+			Name:            forecast.Name,
+			BudgetMiB:       float64(forecast.BudgetBytes) / (1024.0 * 1024.0),
+			UsedMiB:         float64(forecast.UsedBytes) / (1024.0 * 1024.0),
+			UsageRatio:      forecast.UsageRatio,
+			GrowthMiBPerMin: forecast.GrowthBytesPerDay / 1440.0 / (1024.0 * 1024.0),
+			DaysUntilBreach: planDurationString(forecast.DaysUntilBreach),
+		})
+	}
+	return out
+}
+
+func fallbackBudgetRecommendations(
+	namespaceForecasts []capacityv1.StorageBudgetForecast,
+	workloadForecasts []capacityv1.StorageBudgetForecast,
+) string {
+	if len(namespaceForecasts) == 0 && len(workloadForecasts) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, 3)
+	if len(workloadForecasts) > 0 {
+		w := workloadForecasts[0]
+		lines = append(lines, fmt.Sprintf(
+			"1) Review workload %s/%s/%s budget drift in the next 24h; current usage is %.1f%% of budget with growth %.2f MiB/min.",
+			w.Namespace, w.Kind, w.Name, w.UsageRatio*100.0, w.GrowthBytesPerDay/1440.0/(1024.0*1024.0),
+		))
+	}
+	if len(namespaceForecasts) > 0 {
+		n := namespaceForecasts[0]
+		lines = append(lines, fmt.Sprintf(
+			"2) Validate namespace %s budget headroom this week; usage is %.1f%% with projected growth %.2f MiB/min.",
+			n.Namespace, n.UsageRatio*100.0, n.GrowthBytesPerDay/1440.0/(1024.0*1024.0),
+		))
+	}
+	if len(lines) < 3 {
+		lines = append(lines, "3) Re-evaluate per-workload budgets after next trend window to confirm sustained growth before resizing.")
+	}
+	return strings.Join(lines, " ")
+}
+
+func (r *CapacityPlanReconciler) generatePromptInsight(
+	ctx context.Context,
+	client llm.InsightGenerator,
+	provider string,
+	model string,
+	prompt llm.PromptParts,
+	logKey string,
+) (string, error) {
+	opmetrics.LLMRequestsTotal.WithLabelValues(provider, model).Inc()
+	start := time.Now()
+	text, err := llm.GenerateFromPrompt(ctx, client, prompt)
+	opmetrics.LLMLatencySeconds.WithLabelValues(provider, model).Observe(time.Since(start).Seconds())
+	if err != nil {
+		opmetrics.LLMErrorsTotal.WithLabelValues(provider, model).Inc()
+		if isLLMTimeoutError(err) {
+			opmetrics.LLMTimeoutsTotal.WithLabelValues(provider, model).Inc()
+		}
+		log.FromContext(ctx).V(1).Info("LLM prompt generation failed, keeping previous", "subject", logKey, "error", err)
+		return "", err
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", fmt.Errorf("llm prompt returned empty response for %s", logKey)
+	}
+	return text, nil
+}
+
+func (r *CapacityPlanReconciler) refreshPlanRiskChangeInsight(
+	ctx context.Context,
+	planName string,
+	state llmClientState,
+	riskChangeSummary string,
+	riskChanges []capacityv1.PVCRiskChange,
+	topRisks []capacityv1.PVCRiskSummary,
+) (string, *metav1.Time) {
+	summary := strings.TrimSpace(state.prevText)
+	last := state.prevTime
+	if !state.isEnabled || state.client == nil {
+		return summary, last
+	}
+	if summary == "" {
+		summary = strings.TrimSpace(riskChangeSummary)
+	}
+	if !state.shouldRefresh() || !supportsPromptExecution(state.client) {
+		return summary, last
+	}
+	prompt := llm.BuildRiskChangePromptParts(llm.PlanRiskChangeContext{
+		PlanName:          planName,
+		RiskChangeSummary: strings.TrimSpace(riskChangeSummary),
+		Changes:           toPlanRiskChanges(riskChanges, 8),
+		TopRisks:          toPlanTopRisks(topRisks, 5),
+	})
+	text, err := r.generatePromptInsight(ctx, state.client, state.provider, state.model, prompt, "plan-risk-change")
+	if err != nil {
+		return summary, last
+	}
+	now := metav1.NewTime(state.now)
+	return text, &now
+}
+
+func (r *CapacityPlanReconciler) refreshPlanBudgetRecommendations(
+	ctx context.Context,
+	planName string,
+	state llmClientState,
+	namespaceForecasts []capacityv1.StorageBudgetForecast,
+	workloadForecasts []capacityv1.StorageBudgetForecast,
+	topRisks []capacityv1.PVCRiskSummary,
+) (string, *metav1.Time) {
+	recommendations := strings.TrimSpace(state.prevText)
+	last := state.prevTime
+	if !state.isEnabled || state.client == nil {
+		return recommendations, last
+	}
+	if len(namespaceForecasts) == 0 && len(workloadForecasts) == 0 {
+		return "", nil
+	}
+	if recommendations == "" {
+		recommendations = fallbackBudgetRecommendations(namespaceForecasts, workloadForecasts)
+	}
+	if !state.shouldRefresh() || !supportsPromptExecution(state.client) {
+		return recommendations, last
+	}
+	prompt := llm.BuildBudgetRecommendationPromptParts(llm.PlanBudgetRecommendationsContext{
+		PlanName:           planName,
+		NamespaceForecasts: toPlanBudgetForecasts(namespaceForecasts, 5),
+		WorkloadForecasts:  toPlanBudgetForecasts(workloadForecasts, 8),
+		TopRisks:           toPlanTopRisks(topRisks, 5),
+	})
+	text, err := r.generatePromptInsight(ctx, state.client, state.provider, state.model, prompt, "plan-budget-recommendations")
+	if err != nil {
+		return recommendations, last
+	}
+	now := metav1.NewTime(state.now)
+	return text, &now
 }
 
 // listScopedPVCs returns PVCs in the watched namespaces (all if empty).
@@ -617,69 +896,117 @@ func (r *CapacityPlanReconciler) buildLLMProviderConfig(
 	case llm.ProviderDisabled:
 		return cfg, "", nil
 	case llm.ProviderOpenAI:
-		apiKey, secretRV, err := r.readSecretValue(ctx, spec.OpenAI.SecretRefName, defaultSecretKey(spec.OpenAI.SecretKey, "apiKey"))
+		extra, err := r.configureOpenAIProvider(ctx, &cfg, spec.OpenAI)
 		if err != nil {
 			return llm.ProviderConfig{}, "", err
 		}
-		cfg.OpenAI = llm.OpenAIConfig{
-			APIKey:  apiKey,
-			BaseURL: strings.TrimSpace(spec.OpenAI.BaseURL),
-		}
-		cacheKeyParts = append(cacheKeyParts,
-			"openai.baseURL="+cfg.OpenAI.BaseURL,
-			"openai.secret="+strings.TrimSpace(spec.OpenAI.SecretRefName),
-			"openai.secretKey="+defaultSecretKey(spec.OpenAI.SecretKey, "apiKey"),
-			"openai.secretRV="+secretRV,
-		)
+		cacheKeyParts = append(cacheKeyParts, extra...)
 	case llm.ProviderAnthropic:
-		apiKey, secretRV, err := r.readSecretValue(ctx, spec.Anthropic.SecretRefName, defaultSecretKey(spec.Anthropic.SecretKey, "apiKey"))
+		extra, err := r.configureAnthropicProvider(ctx, &cfg, spec.Anthropic)
 		if err != nil {
 			return llm.ProviderConfig{}, "", err
 		}
-		cfg.Anthropic = llm.AnthropicConfig{
-			APIKey:  apiKey,
-			BaseURL: strings.TrimSpace(spec.Anthropic.BaseURL),
-		}
-		cacheKeyParts = append(cacheKeyParts,
-			"anthropic.baseURL="+cfg.Anthropic.BaseURL,
-			"anthropic.secret="+strings.TrimSpace(spec.Anthropic.SecretRefName),
-			"anthropic.secretKey="+defaultSecretKey(spec.Anthropic.SecretKey, "apiKey"),
-			"anthropic.secretRV="+secretRV,
-		)
+		cacheKeyParts = append(cacheKeyParts, extra...)
 	case llm.ProviderFastAPI:
-		authToken := ""
-		authSecretRV := ""
-		if strings.TrimSpace(spec.FastAPI.AuthSecretRefName) != "" {
-			token, secretRV, err := r.readSecretValue(ctx, spec.FastAPI.AuthSecretRefName, defaultSecretKey(spec.FastAPI.AuthSecretKey, "token"))
-			if err != nil {
-				return llm.ProviderConfig{}, "", err
-			}
-			authToken = token
-			authSecretRV = secretRV
+		extra, err := r.configureFastAPIProvider(ctx, &cfg, spec.FastAPI)
+		if err != nil {
+			return llm.ProviderConfig{}, "", err
 		}
-		cfg.FastAPI = llm.FastAPIConfig{
-			URL:              strings.TrimSpace(spec.FastAPI.URL),
-			AuthToken:        authToken,
-			TLSSkipVerify:    spec.FastAPI.TLSSkipVerify,
-			HealthURL:        strings.TrimSpace(spec.FastAPI.HealthURL),
-			FailureThreshold: spec.FastAPI.FailureThreshold,
-			Cooldown:         spec.FastAPI.Cooldown.Duration,
-		}
-		cacheKeyParts = append(cacheKeyParts,
-			"fastapi.url="+cfg.FastAPI.URL,
-			fmt.Sprintf("fastapi.tlsSkipVerify=%t", cfg.FastAPI.TLSSkipVerify),
-			"fastapi.healthURL="+cfg.FastAPI.HealthURL,
-			fmt.Sprintf("fastapi.failureThreshold=%d", cfg.FastAPI.FailureThreshold),
-			"fastapi.cooldown="+cfg.FastAPI.Cooldown.String(),
-			"fastapi.authSecret="+strings.TrimSpace(spec.FastAPI.AuthSecretRefName),
-			"fastapi.authSecretKey="+defaultSecretKey(spec.FastAPI.AuthSecretKey, "token"),
-			"fastapi.authSecretRV="+authSecretRV,
-		)
+		cacheKeyParts = append(cacheKeyParts, extra...)
+	case llm.ProviderOllama:
+		cacheKeyParts = append(cacheKeyParts, r.configureOllamaProvider(&cfg, spec.Ollama)...)
 	default:
 		return llm.ProviderConfig{}, "", fmt.Errorf("unsupported llm provider %q", provider)
 	}
 
 	return cfg, strings.Join(cacheKeyParts, "|"), nil
+}
+
+func (r *CapacityPlanReconciler) configureOpenAIProvider(
+	ctx context.Context,
+	cfg *llm.ProviderConfig,
+	spec capacityv1.OpenAIProviderSpec,
+) ([]string, error) {
+	apiKey, secretRV, err := r.readSecretValue(ctx, spec.SecretRefName, defaultSecretKey(spec.SecretKey, "apiKey"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.OpenAI = llm.OpenAIConfig{
+		APIKey:  apiKey,
+		BaseURL: strings.TrimSpace(spec.BaseURL),
+	}
+	return []string{
+		"openai.baseURL=" + cfg.OpenAI.BaseURL,
+		"openai.secret=" + strings.TrimSpace(spec.SecretRefName),
+		"openai.secretKey=" + defaultSecretKey(spec.SecretKey, "apiKey"),
+		"openai.secretRV=" + secretRV,
+	}, nil
+}
+
+func (r *CapacityPlanReconciler) configureAnthropicProvider(
+	ctx context.Context,
+	cfg *llm.ProviderConfig,
+	spec capacityv1.AnthropicProviderSpec,
+) ([]string, error) {
+	apiKey, secretRV, err := r.readSecretValue(ctx, spec.SecretRefName, defaultSecretKey(spec.SecretKey, "apiKey"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.Anthropic = llm.AnthropicConfig{
+		APIKey:  apiKey,
+		BaseURL: strings.TrimSpace(spec.BaseURL),
+	}
+	return []string{
+		"anthropic.baseURL=" + cfg.Anthropic.BaseURL,
+		"anthropic.secret=" + strings.TrimSpace(spec.SecretRefName),
+		"anthropic.secretKey=" + defaultSecretKey(spec.SecretKey, "apiKey"),
+		"anthropic.secretRV=" + secretRV,
+	}, nil
+}
+
+func (r *CapacityPlanReconciler) configureFastAPIProvider(
+	ctx context.Context,
+	cfg *llm.ProviderConfig,
+	spec capacityv1.FastAPIProviderSpec,
+) ([]string, error) {
+	authToken := ""
+	authSecretRV := ""
+	if strings.TrimSpace(spec.AuthSecretRefName) != "" {
+		token, secretRV, err := r.readSecretValue(ctx, spec.AuthSecretRefName, defaultSecretKey(spec.AuthSecretKey, "token"))
+		if err != nil {
+			return nil, err
+		}
+		authToken = token
+		authSecretRV = secretRV
+	}
+	cfg.FastAPI = llm.FastAPIConfig{
+		URL:              strings.TrimSpace(spec.URL),
+		AuthToken:        authToken,
+		TLSSkipVerify:    spec.TLSSkipVerify,
+		HealthURL:        strings.TrimSpace(spec.HealthURL),
+		FailureThreshold: spec.FailureThreshold,
+		Cooldown:         spec.Cooldown.Duration,
+	}
+	return []string{
+		"fastapi.url=" + cfg.FastAPI.URL,
+		fmt.Sprintf("fastapi.tlsSkipVerify=%t", cfg.FastAPI.TLSSkipVerify),
+		"fastapi.healthURL=" + cfg.FastAPI.HealthURL,
+		fmt.Sprintf("fastapi.failureThreshold=%d", cfg.FastAPI.FailureThreshold),
+		"fastapi.cooldown=" + cfg.FastAPI.Cooldown.String(),
+		"fastapi.authSecret=" + strings.TrimSpace(spec.AuthSecretRefName),
+		"fastapi.authSecretKey=" + defaultSecretKey(spec.AuthSecretKey, "token"),
+		"fastapi.authSecretRV=" + authSecretRV,
+	}, nil
+}
+
+func (r *CapacityPlanReconciler) configureOllamaProvider(
+	cfg *llm.ProviderConfig,
+	spec capacityv1.OllamaProviderSpec,
+) []string {
+	cfg.Ollama = llm.OllamaConfig{
+		URL: strings.TrimSpace(spec.URL),
+	}
+	return []string{"ollama.url=" + cfg.Ollama.URL}
 }
 
 func (r *CapacityPlanReconciler) readSecretValue(ctx context.Context, name, key string) (string, string, error) {
@@ -732,6 +1059,17 @@ func defaultLLMModelLabel(v string) string {
 	return v
 }
 
+func isLLMTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if stderrors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return stderrors.As(err, &netErr) && netErr.Timeout()
+}
+
 func (r *CapacityPlanReconciler) getCachedLLMClient(key string) llm.InsightGenerator {
 	r.llmCacheMu.RLock()
 	defer r.llmCacheMu.RUnlock()
@@ -775,9 +1113,13 @@ func (r *CapacityPlanReconciler) markPlanInactive(
 	plan.Status.RiskDigest = ""
 	plan.Status.RiskChanges = nil
 	plan.Status.RiskChangeSummary = ""
+	plan.Status.LLMRiskChangeSummary = ""
+	plan.Status.LastLLMRiskChangeTime = nil
 	plan.Status.RiskSnapshotHash = ""
 	plan.Status.NamespaceForecasts = nil
 	plan.Status.WorkloadForecasts = nil
+	plan.Status.LLMBudgetRecommendations = ""
+	plan.Status.LastLLMBudgetRecommendationsTime = nil
 	plan.Status.Anomalies = nil
 	plan.Status.AnomalySummary = ""
 	plan.Status.LastReconcileTime = &now
@@ -1232,6 +1574,54 @@ func computeRiskSnapshotHash(topRisks []capacityv1.PVCRiskSummary) string {
 		}
 		_ = b.WriteByte('\n')
 	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])
+}
+
+func computeBudgetForecastHash(
+	namespaceForecasts []capacityv1.StorageBudgetForecast,
+	workloadForecasts []capacityv1.StorageBudgetForecast,
+) string {
+	if len(namespaceForecasts) == 0 && len(workloadForecasts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	appendForecasts := func(rows []capacityv1.StorageBudgetForecast) {
+		normalized := make([]capacityv1.StorageBudgetForecast, len(rows))
+		copy(normalized, rows)
+		sort.Slice(normalized, func(i, j int) bool {
+			if normalized[i].Scope != normalized[j].Scope {
+				return normalized[i].Scope < normalized[j].Scope
+			}
+			if normalized[i].Namespace != normalized[j].Namespace {
+				return normalized[i].Namespace < normalized[j].Namespace
+			}
+			if normalized[i].Kind != normalized[j].Kind {
+				return normalized[i].Kind < normalized[j].Kind
+			}
+			return normalized[i].Name < normalized[j].Name
+		})
+		for _, row := range normalized {
+			_, _ = fmt.Fprintf(
+				&b,
+				"%s|%s|%s|%s|%d|%d|%f|%f|",
+				row.Scope,
+				row.Namespace,
+				row.Kind,
+				row.Name,
+				row.BudgetBytes,
+				row.UsedBytes,
+				row.UsageRatio,
+				row.GrowthBytesPerDay,
+			)
+			if row.DaysUntilBreach != nil {
+				_, _ = fmt.Fprintf(&b, "%.12f", *row.DaysUntilBreach)
+			}
+			_ = b.WriteByte('\n')
+		}
+	}
+	appendForecasts(namespaceForecasts)
+	appendForecasts(workloadForecasts)
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:])
 }

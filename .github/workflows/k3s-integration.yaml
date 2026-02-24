@@ -2,6 +2,20 @@ name: K3s Integration
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_llm:
+        description: "Enable in-cluster Ollama-backed LLM insight checks"
+        required: true
+        type: boolean
+        default: false
+      llm_model:
+        description: "Ollama model tag (7B/8B profile)"
+        required: true
+        type: choice
+        options:
+          - "mistral:7b"
+          - "llama3.1:8b"
+        default: "mistral:7b"
 
 permissions:
   contents: read
@@ -20,6 +34,9 @@ jobs:
       OPERATOR_IMAGE: capacity-planning-operator:ci
       CI_RUNNER_BIN: /tmp/cpo-ci-runner
       EXTRA_IMAGES: busybox:1.36
+      KUBE_PROM_VALUES_EXTRA_FILE: hack/ci/kube-prom-values-alerting.yaml
+      ALERTMANAGER_EXPECTED_RECEIVER: ci-webhook
+      ALERTMANAGER_EXPECTED_INTEGRATION: webhook
       K3D_VERSION: v5.7.5
       K3S_IMAGE: rancher/k3s:v1.32.2-k3s1
       KUBECTL_VERSION: v1.32.2
@@ -33,6 +50,13 @@ jobs:
       PLAN_SAMPLE_INTERVAL: 5s
       PLAN_RECONCILE_INTERVAL: 15s
       PLAN_SAMPLE_RETENTION: "32"
+      CI_ENABLE_LLM: ${{ inputs.enable_llm && 'true' || 'false' }}
+      CI_LLM_PROVIDER: ${{ inputs.enable_llm && 'ollama' || 'disabled' }}
+      CI_LLM_MODEL: ${{ inputs.llm_model }}
+      CI_LLM_TIMEOUT_SECONDS: "120"
+      CI_LLM_SOFT_FAIL: "true"
+      CI_LLM_TIMEOUT_HARD_FAIL: "true"
+      CI_LLM_MODEL_PULL_TIMEOUT_SECONDS: "1800"
     steps:
       - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
@@ -45,6 +69,21 @@ jobs:
 
       - name: Verify Go toolchain
         run: go version
+
+      - name: Print LLM Profile
+        run: |
+          echo "LLM profile configuration"
+          echo "  enabled: ${CI_ENABLE_LLM}"
+          echo "  provider: ${CI_LLM_PROVIDER}"
+          echo "  model: ${CI_LLM_MODEL}"
+          echo "  soft_fail: ${CI_LLM_SOFT_FAIL}"
+          echo "  timeout_hard_fail: ${CI_LLM_TIMEOUT_HARD_FAIL}"
+          echo "## LLM Profile" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- enabled: \`${CI_ENABLE_LLM}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- provider: \`${CI_LLM_PROVIDER}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- model: \`${CI_LLM_MODEL}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- soft-fail: \`${CI_LLM_SOFT_FAIL}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- timeout hard-fail: \`${CI_LLM_TIMEOUT_HARD_FAIL}\`" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Build CI runner binary
         run: |

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 )
@@ -68,6 +69,9 @@ type ValidationReport struct {
 	GrowthMathCrosscheck       string                    `json:"growthMathCrosscheck"`
 	PromRuleContent            string                    `json:"promRuleContent"`
 	ManagerMetrics             string                    `json:"managerMetrics"`
+	LLMInsights                string                    `json:"llmInsights,omitempty"`
+	LLMRiskChangeSummary       string                    `json:"llmRiskChangeSummary,omitempty"`
+	LLMBudgetRecommendations   string                    `json:"llmBudgetRecommendations,omitempty"`
 	PrometheusCapacityAlerts   string                    `json:"prometheusCapacityAlerts"`
 	WorkloadBudgetAlerts       string                    `json:"workloadBudgetAlerts"`
 	AlertmanagerCapacityAlerts string                    `json:"alertmanagerCapacityAlerts"`
@@ -147,6 +151,15 @@ func PrintValidationReport(w io.Writer, r ValidationReport) {
 	fmt.Fprintf(w, "  growth_math_crosscheck: %s\n", r.GrowthMathCrosscheck)
 	fmt.Fprintf(w, "  prom_rule_content: %s\n", r.PromRuleContent)
 	fmt.Fprintf(w, "  manager_metrics: %s\n", r.ManagerMetrics)
+	if r.LLMInsights != "" {
+		fmt.Fprintf(w, "  llm_insights: %s\n", r.LLMInsights)
+		if strings.TrimSpace(r.LLMRiskChangeSummary) != "" {
+			fmt.Fprintf(w, "  llm_risk_change_summary: %s\n", r.LLMRiskChangeSummary)
+		}
+		if strings.TrimSpace(r.LLMBudgetRecommendations) != "" {
+			fmt.Fprintf(w, "  llm_budget_recommendations: %s\n", r.LLMBudgetRecommendations)
+		}
+	}
 	fmt.Fprintf(w, "  prometheus_capacity_alerts: %s\n", r.PrometheusCapacityAlerts)
 	fmt.Fprintf(w, "  workload_budget_alerts: %s\n", r.WorkloadBudgetAlerts)
 	fmt.Fprintf(w, "  alertmanager_capacity_alerts: %s\n", r.AlertmanagerCapacityAlerts)

@@ -95,8 +95,35 @@ Stabilize k3s integration/nightly alerting CI so capacity alerts are reliably ev
       - `go run ./cmd/ci-verify summarize-diagnostics --out-dir ... --plan-name ...`
     - `hack/ci/collect_diagnostics.sh` still captures raw files in Bash, but summary generation is now Go-owned.
     - Workflows upload validation report artifact on every run:
-      - `.github/workflows/k3s-integration.yaml`
-      - `.github/workflows/nightly-e2e.yaml`
+    - `.github/workflows/k3s-integration.yaml`
+    - `.github/workflows/nightly-e2e.yaml`
+
+13. Added Ollama-backed LLM path for CapacityPlan insights and CI configurability.
+    - New provider: `ollama` in API/CRD/provider factory.
+    - New client: `internal/llm/ollama_client.go`.
+    - CI runner env toggles:
+      - `CI_ENABLE_LLM`, `CI_LLM_PROVIDER`, `CI_LLM_MODEL`
+      - `CI_LLM_SOFT_FAIL`, `CI_LLM_TIMEOUT_HARD_FAIL`
+    - LLM timeout metric added:
+      - `capacityplan_llm_timeouts_total{provider,model}`
+    - Manual and nightly workflows now expose/consume 7B/8B model configuration.
+
+14. Added versioned insight prompt template and prompt tests.
+    - `internal/llm/prompt.go` now uses a maintained template (`PromptVersion: insight-v1`) with strict output contract and richer PVC context (usage, growth, confidence, sample window/delta).
+    - Prompt generation is split into `system` + `user` components via `BuildPromptParts`, with a combined fallback for single-prompt providers.
+    - LLM currently generates narrative guidance only; it does not alter deterministic growth/forecast/alert calculations.
+    - Prompt evolution rule: when LLM behavior or response shape changes, update prompt template + prompt tests together.
+    - Plan-level LLM prompts are now versioned too:
+      - `risk-change-v1` -> `status.llmRiskChangeSummary`
+      - `budget-recommendation-v1` -> `status.llmBudgetRecommendations`
+
+15. Alert pipeline validation now verifies routing and delivery semantics.
+    - CI deploys in-cluster `alert-receiver` service in `monitoring`.
+    - Integration validates:
+      - Alertmanager route config points to expected receiver/integration.
+      - `alertmanager_notifications_total{receiver,integration}` increases.
+      - `alertmanager_notifications_failed_total{receiver,integration}` stays zero.
+      - Alert metadata labels/annotations are present for workload/namespace alerts.
 
 ## Validation Run
 

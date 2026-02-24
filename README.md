@@ -6,7 +6,7 @@ A Kubernetes operator that tracks PersistentVolumeClaim (PVC) usage trends and s
 - Prometheus metrics exposed by the operator
 - optional `PrometheusRule` alert generation
 - optional Grafana dashboard ConfigMap generation
-- per-PVC natural language insights via configurable providers (OpenAI, Anthropic, FastAPI)
+- per-PVC natural language insights via configurable providers (OpenAI, Anthropic, FastAPI, Ollama)
 
 This project is built with Kubebuilder/controller-runtime.
 
@@ -58,7 +58,7 @@ CRD type definitions live in `api/v1/capacityplan_types.go`.
 - `llmInsightsInterval duration`
   - Minimum time between LLM refreshes per PVC (default `6h`).
 - `llm`
-  - LLM provider config (`disabled|openai|anthropic|fastapi`), model, timeout/maxTokens/temperature.
+  - LLM provider config (`disabled|openai|anthropic|fastapi|ollama`), model, timeout/maxTokens/temperature.
   - `llm.onlyAlertingPVCs` limits LLM refreshes to PVCs currently firing alerts.
   - OpenAI/Anthropic use Secret refs for API keys.
   - FastAPI supports in-cluster URL and optional bearer-token Secret.
@@ -144,6 +144,7 @@ Metrics are registered in `internal/operator/metrics.go` and served by controlle
 - `capacityplan_pvc_samples_count{namespace,pvc}`
 - `capacityplan_llm_requests_total{provider,model}`
 - `capacityplan_llm_errors_total{provider,model}`
+- `capacityplan_llm_timeouts_total{provider,model}`
 - `capacityplan_llm_latency_seconds{provider,model}`
 
 ## Alerts and Dashboard
@@ -194,13 +195,14 @@ This supports Grafana sidecar-based dashboard auto-discovery.
 
 LLM integration is abstracted by `internal/llm.InsightGenerator`.
 
-`CapacityPlanReconciler` resolves provider config from `spec.llm` and instantiates the selected backend (`openai`, `anthropic`, or `fastapi`). Rate-limiting is enforced via `status.lastLLMTime` and `spec.llmInsightsInterval`.
+`CapacityPlanReconciler` resolves provider config from `spec.llm` and instantiates the selected backend (`openai`, `anthropic`, `fastapi`, or `ollama`). Rate-limiting is enforced via `status.lastLLMTime` and `spec.llmInsightsInterval`.
 If `spec.llm.onlyAlertingPVCs=true`, only PVCs with `alertFiring=true` trigger LLM refreshes.
 
 Provider auth details:
 - `openai`: secret in operator namespace (`spec.llm.openai.secretRefName`, key default `apiKey`)
 - `anthropic`: secret in operator namespace (`spec.llm.anthropic.secretRefName`, key default `apiKey`)
 - `fastapi`: optional bearer token secret (`spec.llm.fastapi.authSecretRefName`, key default `token`)
+- `ollama`: no secret required; configure `spec.llm.ollama.url` to your in-cluster Ollama service
 
 FastAPI resilience details:
 - Supports `healthURL` (defaults to `/<host>/healthz`).
@@ -223,7 +225,7 @@ The operator uses controller-runtime/zap structured logging (JSON by default).
 - `internal/controller/`: reconcilers and envtest suite
 - `internal/analysis/`: ring buffer + OLS growth logic
 - `internal/metrics/`: metrics backend interface + Prometheus client
-- `internal/llm/`: LLM interface, provider factory, OpenAI/Anthropic/FastAPI clients, stub/mock clients
+- `internal/llm/`: LLM interface, provider factory, OpenAI/Anthropic/FastAPI/Ollama clients, stub/mock clients
 - `internal/operator/`: Prometheus metric registration
 - `config/`: kustomize, CRDs, RBAC, manager manifests
 
@@ -273,6 +275,9 @@ Manual k3s integration workflow: `.github/workflows/k3s-integration.yaml`
     - capacity alerts in Prometheus `ALERTS`
     - workload budget alerts for all CI workloads
     - capacity alerts in Alertmanager API (`/api/v2/alerts`)
+    - Alertmanager route targets expected receiver/integration
+    - Alertmanager delivery counters show successful notifications (no failures)
+    - delivered webhook payloads include expected labels/annotations for workload/namespace/PVC alerts
   - final machine-readable validation report (`/tmp/cpo-ci-validation-report.json`)
 
 Integration harness files:
@@ -350,6 +355,7 @@ Provider-specific examples:
 - OpenAI: `config/samples/secret_openai_api_key.yaml`, `config/samples/capacityplanning_v1_capacityplan_openai.yaml`
 - Anthropic: `config/samples/secret_anthropic_api_key.yaml`, `config/samples/capacityplanning_v1_capacityplan_anthropic.yaml`
 - FastAPI (in-cluster): `config/samples/secret_fastapi_bearer_token.yaml`, `config/samples/capacityplanning_v1_capacityplan_fastapi.yaml`
+- Ollama (in-cluster): `config/samples/capacityplanning_v1_capacityplan_ollama.yaml`
 
 ## Codebase Review Notes (Current State)
 

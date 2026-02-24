@@ -3,12 +3,15 @@ package cirunner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -38,6 +41,7 @@ type integrationState struct {
 	checkGrowthCompare  string
 	checkPromRule       string
 	checkManagerMetrics string
+	checkLLMInsights    string
 	checkPromAlerts     string
 	checkWorkloadAlerts string
 	checkAlertmanager   string
@@ -52,7 +56,9 @@ type IntegrationRunner struct {
 
 	promPF        *PortForwardSession
 	alertPF       *PortForwardSession
+	alertReceiver *PortForwardSession
 	managerPF     *PortForwardSession
+	llmPF         *PortForwardSession
 	promClient    *civerify.PrometheusClient
 	alertVerifier *civerify.AlertVerifier
 }
@@ -78,6 +84,7 @@ func NewIntegrationRunner(cfg Config) (*IntegrationRunner, error) {
 			checkGrowthCompare:  "pending",
 			checkPromRule:       "pending",
 			checkManagerMetrics: "pending",
+			checkLLMInsights:    "pending",
 			checkPromAlerts:     "pending",
 			checkWorkloadAlerts: "pending",
 			checkAlertmanager:   "pending",
@@ -86,8 +93,14 @@ func NewIntegrationRunner(cfg Config) (*IntegrationRunner, error) {
 }
 
 func (r *IntegrationRunner) closePortForwards() {
+	if r.llmPF != nil {
+		r.llmPF.Close()
+	}
 	if r.managerPF != nil {
 		r.managerPF.Close()
+	}
+	if r.alertReceiver != nil {
+		r.alertReceiver.Close()
 	}
 	if r.promPF != nil {
 		r.promPF.Close()
@@ -115,6 +128,7 @@ func (r *IntegrationRunner) renderValidationReport() {
 		GrowthMathCrosscheck:       r.state.checkGrowthCompare,
 		PromRuleContent:            r.state.checkPromRule,
 		ManagerMetrics:             r.state.checkManagerMetrics,
+		LLMInsights:                r.state.checkLLMInsights,
 		PrometheusCapacityAlerts:   r.state.checkPromAlerts,
 		WorkloadBudgetAlerts:       r.state.checkWorkloadAlerts,
 		AlertmanagerCapacityAlerts: r.state.checkAlertmanager,
@@ -129,7 +143,7 @@ func (r *IntegrationRunner) renderValidationReport() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	report.PVCTrendDetails, report.WorkloadBudgetDetails = r.printCapacityPlanInsights(ctx)
+	report.PVCTrendDetails, report.WorkloadBudgetDetails, report.LLMRiskChangeSummary, report.LLMBudgetRecommendations = r.printCapacityPlanInsights(ctx)
 	report.AlertmanagerNotifications = r.printAlertmanagerInsights(ctx)
 	if err := civerify.WriteValidationReportJSON(r.cfg.ValidationReportJSON, report); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write validation report: %v\n", err)
@@ -197,11 +211,11 @@ func alertReasonHint(alertName string) string {
 	}
 }
 
-func (r *IntegrationRunner) printCapacityPlanInsights(ctx context.Context) ([]civerify.PVCTrendDetail, []civerify.WorkloadBudgetDetail) {
+func (r *IntegrationRunner) printCapacityPlanInsights(ctx context.Context) ([]civerify.PVCTrendDetail, []civerify.WorkloadBudgetDetail, string, string) {
 	cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
 	if err != nil {
 		fmt.Printf("Detailed insights: unable to fetch CapacityPlan %q: %v\n", r.cfg.PlanName, err)
-		return nil, nil
+		return nil, nil, "", ""
 	}
 
 	pvcDetails := make([]civerify.PVCTrendDetail, 0, len(cp.Status.PVCs))
@@ -288,7 +302,17 @@ func (r *IntegrationRunner) printCapacityPlanInsights(ctx context.Context) ([]ci
 		}
 		_ = tw.Flush()
 	}
-	return pvcDetails, workloadDetails
+	llmRiskChangeSummary := strings.TrimSpace(cp.Status.LLMRiskChangeSummary)
+	llmBudgetRecommendations := strings.TrimSpace(cp.Status.LLMBudgetRecommendations)
+	if llmRiskChangeSummary != "" {
+		fmt.Println("Plan-level LLM risk-change insight")
+		fmt.Printf("  %s\n", llmRiskChangeSummary)
+	}
+	if llmBudgetRecommendations != "" {
+		fmt.Println("Plan-level LLM budget recommendations")
+		fmt.Printf("  %s\n", llmBudgetRecommendations)
+	}
+	return pvcDetails, workloadDetails, llmRiskChangeSummary, llmBudgetRecommendations
 }
 
 func (r *IntegrationRunner) printAlertmanagerInsights(ctx context.Context) []civerify.AlertNotificationDetail {
@@ -581,6 +605,35 @@ func httpBody(ctx context.Context, url string, timeout time.Duration) (string, e
 	if err != nil {
 		return "", err
 	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("http %d: %s", resp.StatusCode, string(raw))
+	}
+	return string(raw), nil
+}
+
+func httpPostJSON(ctx context.Context, url string, payload any, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -1156,6 +1209,9 @@ func (r *IntegrationRunner) startManagerMetricsPortForward(ctx context.Context) 
 		if !strings.Contains(body, "capacityplan_pvc_anomaly") {
 			return false, nil
 		}
+		if r.llmEnabled() && !strings.Contains(body, "capacityplan_llm_requests_total") {
+			return false, nil
+		}
 		return true, nil
 	})
 }
@@ -1191,6 +1247,28 @@ func (r *IntegrationRunner) startAlertmanagerPortForward(ctx context.Context) er
 	return nil
 }
 
+func (r *IntegrationRunner) startAlertReceiverPortForward(ctx context.Context) error {
+	pod, err := getFirstPodByLabel(ctx, r.clients, r.cfg.MonitoringNamespace, map[string]string{"app": "alert-receiver"})
+	if err != nil {
+		return err
+	}
+	pf, err := StartPodPortForward(r.clients, r.cfg.MonitoringNamespace, pod.Name, 19094, 8080)
+	if err != nil {
+		return err
+	}
+	r.alertReceiver = pf
+	if err := pf.WaitReady(30 * time.Second); err != nil {
+		return err
+	}
+	return waitUntil(ctx, time.Duration(r.cfg.AlertEndpointReadyTimeout)*time.Second, r.cfg.PollInterval(), "alert-receiver /healthz", func(ctx context.Context) (bool, error) {
+		_, err := httpBody(ctx, "http://127.0.0.1:19094/healthz", 5*time.Second)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	})
+}
+
 func (r *IntegrationRunner) verifyAlerts(ctx context.Context) error {
 	poll := r.cfg.PollInterval()
 	timeout := time.Duration(r.cfg.AlertPropagationTimeout) * time.Second
@@ -1223,7 +1301,108 @@ func (r *IntegrationRunner) verifyAlerts(ctx context.Context) error {
 	if err := civerify.WaitUntil(ctx, timeout, poll, r.alertVerifier.AlertmanagerHasCapacityAlerts); err != nil {
 		return fmt.Errorf("timed out waiting for capacity alerts in Alertmanager API after %ds", r.cfg.AlertPropagationTimeout)
 	}
-	r.state.checkAlertmanager = "pass"
+
+	expectedReceiver := strings.TrimSpace(r.cfg.AlertmanagerExpectedReceiver)
+	expectedIntegration := strings.TrimSpace(r.cfg.AlertmanagerExpectedIntegration)
+	if expectedIntegration == "" {
+		expectedIntegration = "webhook"
+	}
+
+	if err := waitUntil(ctx, timeout, poll, "alertmanager route config for expected receiver", func(ctx context.Context) (bool, error) {
+		statusBody, err := httpBody(ctx, "http://127.0.0.1:19093/api/v2/status", 5*time.Second)
+		if err != nil {
+			return false, nil
+		}
+		err = validateAlertmanagerRouteConfig(
+			statusBody,
+			expectedReceiver,
+			expectedIntegration,
+		)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		return fmt.Errorf("alertmanager routing validation failed: %w", err)
+	}
+
+	expectedLabels := map[string]string{
+		"integration": expectedIntegration,
+	}
+	if expectedReceiver != "" {
+		expectedLabels["receiver"] = expectedReceiver
+	}
+	sent := 0.0
+	failed := 0.0
+	if err := waitUntil(ctx, timeout, poll, "alertmanager receiver delivery", func(ctx context.Context) (bool, error) {
+		metricsBody, err := httpBody(ctx, "http://127.0.0.1:19093/metrics", 5*time.Second)
+		if err != nil {
+			return false, nil
+		}
+		sent = parseCounterSumWithLabels(metricsBody, "alertmanager_notifications_total", expectedLabels)
+		failed = parseCounterSumWithLabels(metricsBody, "alertmanager_notifications_failed_total", expectedLabels)
+		return sent > 0 && failed == 0, nil
+	}); err != nil {
+		return fmt.Errorf("alertmanager delivery validation failed for receiver=%q integration=%q: sent=%.0f failed=%.0f",
+			expectedReceiver, expectedIntegration, sent, failed)
+	}
+
+	apiDetails, err := r.alertVerifier.AlertmanagerCapacityAlertDetails(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching alertmanager capacity alert details: %w", err)
+	}
+	if err := validateAlertMetadata(apiDetails, r.cfg.CIWorkloads); err != nil {
+		return fmt.Errorf("alertmanager metadata validation failed: %w", err)
+	}
+
+	receiverRecordCount := 0
+	receiverAlertCount := 0
+	if expectedIntegration == "webhook" {
+		if err := waitUntil(ctx, timeout, poll, "alert-receiver notification payloads", func(ctx context.Context) (bool, error) {
+			body, err := httpBody(ctx, "http://127.0.0.1:19094/records", 5*time.Second)
+			if err != nil {
+				return false, nil
+			}
+			records, err := parseAlertReceiverRecords(body)
+			if err != nil {
+				return false, nil
+			}
+			if records.Count < 1 || len(records.Records) < 1 {
+				return false, nil
+			}
+			deliveredDetails, err := parseAlertReceiverDetails(records, expectedReceiver)
+			if err != nil {
+				return false, nil
+			}
+			if err := validateAlertMetadata(deliveredDetails, r.cfg.CIWorkloads); err != nil {
+				return false, nil
+			}
+			receiverRecordCount = records.Count
+			receiverAlertCount = len(deliveredDetails)
+			return true, nil
+		}); err != nil {
+			return fmt.Errorf("alert-receiver payload validation failed: %w", err)
+		}
+	}
+
+	fmt.Println("Alert pipeline interpretation")
+	fmt.Printf("  routing: receiver=%s integration=%s\n", expectedReceiver, expectedIntegration)
+	fmt.Printf("  alertmanager notifications: sent=%.0f failed=%.0f\n", sent, failed)
+	if expectedIntegration == "webhook" {
+		fmt.Printf("  delivered payloads: records=%d capacityAlerts=%d\n", receiverRecordCount, receiverAlertCount)
+	}
+	fmt.Printf("  metadata coverage: workload alerts validated for %d/%d workloads\n", len(r.cfg.CIWorkloads), len(r.cfg.CIWorkloads))
+
+	r.state.checkAlertmanager = fmt.Sprintf(
+		"pass (receiver=%s integration=%s sent=%.0f failed=%.0f apiAlerts=%d payloadAlerts=%d records=%d)",
+		expectedReceiver,
+		expectedIntegration,
+		sent,
+		failed,
+		len(apiDetails),
+		receiverAlertCount,
+		receiverRecordCount,
+	)
 	return nil
 }
 
@@ -1403,6 +1582,14 @@ func (r *IntegrationRunner) setupMonitoring(ctx context.Context) error {
 		return err
 	}
 
+	logStep("Deploying Alertmanager webhook receiver")
+	if err := ApplyAlertReceiverManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
+		return err
+	}
+	if err := waitForDeploymentRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "alert-receiver", 5*time.Minute, r.cfg.PollInterval()); err != nil {
+		return err
+	}
+
 	logStep("Waiting for monitoring CRDs and workloads")
 	if err := waitForCRDsEstablished(ctx, r.clients, []string{
 		"servicemonitors.monitoring.coreos.com",
@@ -1447,8 +1634,96 @@ func (r *IntegrationRunner) deployOperator(ctx context.Context) error {
 	return nil
 }
 
+func (r *IntegrationRunner) llmEnabled() bool {
+	if !r.cfg.LLMEnabled {
+		return false
+	}
+	return strings.TrimSpace(r.cfg.LLMProvider) != "" && strings.TrimSpace(r.cfg.LLMProvider) != "disabled"
+}
+
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func (r *IntegrationRunner) shouldHardFailLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isTimeoutErr(err) {
+		return r.cfg.LLMTimeoutHardFail
+	}
+	return !r.cfg.LLMSoftFail
+}
+
+func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
+	if !r.llmEnabled() {
+		r.state.checkLLMInsights = "skipped (provider disabled)"
+		return nil
+	}
+	if strings.TrimSpace(r.cfg.LLMProvider) != "ollama" {
+		return fmt.Errorf("unsupported CI LLM provider %q (only ollama is supported in CI runner)", r.cfg.LLMProvider)
+	}
+
+	logStep("Deploying in-cluster LLM backend (Ollama)")
+	if err := ApplyLLMManifests(ctx, r.clients, r.cfg.CIManifestDir, r.cfg); err != nil {
+		return err
+	}
+	if err := waitForDeploymentRollout(ctx, r.clients, r.cfg.LLMNamespace, r.cfg.LLMDeploymentName, 15*time.Minute, r.cfg.PollInterval()); err != nil {
+		return err
+	}
+
+	pod, err := getFirstPodByLabel(ctx, r.clients, r.cfg.LLMNamespace, map[string]string{"app.kubernetes.io/name": "ollama"})
+	if err != nil {
+		return err
+	}
+	pf, err := StartPodPortForward(r.clients, r.cfg.LLMNamespace, pod.Name, 21134, 11434)
+	if err != nil {
+		return err
+	}
+	r.llmPF = pf
+	if err := pf.WaitReady(30 * time.Second); err != nil {
+		return err
+	}
+
+	if err := waitUntil(ctx, 90*time.Second, r.cfg.PollInterval(), "Ollama /api/tags", func(ctx context.Context) (bool, error) {
+		body, err := httpBody(ctx, "http://127.0.0.1:21134/api/tags", 5*time.Second)
+		if err != nil {
+			return false, nil
+		}
+		return strings.Contains(body, "models"), nil
+	}); err != nil {
+		return err
+	}
+
+	logStep(fmt.Sprintf("Preparing Ollama model %q", r.cfg.LLMModel))
+	pullTimeout := time.Duration(r.cfg.LLMModelPullTimeoutSeconds) * time.Second
+	if pullTimeout <= 0 {
+		pullTimeout = 20 * time.Minute
+	}
+	pullCtx, cancel := context.WithTimeout(ctx, pullTimeout)
+	defer cancel()
+	payload := map[string]interface{}{
+		"model":  r.cfg.LLMModel,
+		"stream": false,
+	}
+	if _, err := httpPostJSON(pullCtx, "http://127.0.0.1:21134/api/pull", payload, pullTimeout); err != nil {
+		return fmt.Errorf("pulling ollama model %q: %w", r.cfg.LLMModel, err)
+	}
+	return nil
+}
+
 func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.Time, error) {
 	logStep("Creating PVC workload and CapacityPlan")
+	if err := r.setupLLMBackendForWorkload(ctx); err != nil {
+		return nil, err
+	}
 	if err := ApplyWorkloadStorageManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
 		return nil, err
 	}
@@ -1492,6 +1767,17 @@ func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.
 	return firstReconcile, nil
 }
 
+func (r *IntegrationRunner) setupLLMBackendForWorkload(ctx context.Context) error {
+	if err := r.deployLLMBackend(ctx); err != nil {
+		if r.shouldHardFailLLMError(err) {
+			return err
+		}
+		r.state.checkLLMInsights = "warn (backend setup failed: " + err.Error() + ")"
+		fmt.Printf("LLM backend warning: %v\n", err)
+	}
+	return nil
+}
+
 func (r *IntegrationRunner) runTrendAndPolicyChecks(ctx context.Context, firstReconcile *metav1.Time) error {
 	if err := r.observeTrends(ctx); err != nil {
 		return err
@@ -1517,13 +1803,312 @@ func (r *IntegrationRunner) runTrendAndPolicyChecks(ctx context.Context, firstRe
 		return err
 	}
 	r.state.checkManagerMetrics = "pass"
+	if err := r.verifyLLMInsights(ctx); err != nil {
+		if r.shouldHardFailLLMError(err) {
+			return err
+		}
+		r.state.checkLLMInsights = "warn (" + err.Error() + ")"
+		fmt.Printf("LLM verification warning: %v\n", err)
+	}
 	return nil
+}
+
+func parsePrometheusCounterSum(body, metricName string) float64 {
+	sum := 0.0
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, metricName+"{") && !strings.HasPrefix(line, metricName+" ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		sum += v
+	}
+	return sum
+}
+
+func parseMetricLabels(raw string) map[string]string {
+	out := map[string]string{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	for pair := range strings.SplitSeq(raw, ",") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+		if key == "" {
+			continue
+		}
+		out[key] = val
+	}
+	return out
+}
+
+func metricLabelsMatch(labels map[string]string, want map[string]string) bool {
+	for k, v := range want {
+		if labels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func parseCounterSumWithLabels(body, metricName string, requiredLabels map[string]string) float64 {
+	sum := 0.0
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, metricName+"{") && !strings.HasPrefix(line, metricName+" ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		labels := map[string]string{}
+		if strings.HasPrefix(fields[0], metricName+"{") {
+			openIdx := strings.Index(fields[0], "{")
+			closeIdx := strings.LastIndex(fields[0], "}")
+			if openIdx >= 0 && closeIdx > openIdx {
+				labels = parseMetricLabels(fields[0][openIdx+1 : closeIdx])
+			}
+		}
+		if !metricLabelsMatch(labels, requiredLabels) {
+			continue
+		}
+		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		sum += v
+	}
+	return sum
+}
+
+func parseAlertmanagerOriginalConfig(statusBody string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(statusBody), &payload); err != nil {
+		return ""
+	}
+	configNode, ok := payload["config"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	original, _ := configNode["original"].(string)
+	return strings.TrimSpace(original)
+}
+
+type alertReceiverRecords struct {
+	Count   int      `json:"count"`
+	Records []string `json:"records"`
+}
+
+type alertmanagerWebhookPayload struct {
+	Receiver string `json:"receiver"`
+	Alerts   []struct {
+		Status      string            `json:"status"`
+		Labels      map[string]string `json:"labels"`
+		Annotations map[string]string `json:"annotations"`
+		StartsAt    string            `json:"startsAt"`
+		EndsAt      string            `json:"endsAt"`
+	} `json:"alerts"`
+}
+
+func parseAlertReceiverRecords(body string) (alertReceiverRecords, error) {
+	var payload alertReceiverRecords
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return alertReceiverRecords{}, fmt.Errorf("decoding alert-receiver records: %w", err)
+	}
+	return payload, nil
+}
+
+func parseAlertReceiverDetails(payload alertReceiverRecords, expectedReceiver string) ([]civerify.AlertDetail, error) {
+	details := make([]civerify.AlertDetail, 0, len(payload.Records))
+	expectedReceiver = strings.TrimSpace(expectedReceiver)
+	for _, raw := range payload.Records {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		var msg alertmanagerWebhookPayload
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+			return nil, fmt.Errorf("decoding alert-receiver record payload: %w", err)
+		}
+		if expectedReceiver != "" && strings.TrimSpace(msg.Receiver) != expectedReceiver {
+			return nil, fmt.Errorf("unexpected receiver in delivered payload: got %q want %q", strings.TrimSpace(msg.Receiver), expectedReceiver)
+		}
+		for _, alert := range msg.Alerts {
+			name := strings.TrimSpace(alert.Labels["alertname"])
+			switch name {
+			case "PVCUsageHigh", "PVCUsageCritical", "NamespaceBudgetBreachSoon", "WorkloadBudgetBreachSoon":
+				details = append(details, civerify.AlertDetail{
+					AlertName:   name,
+					State:       strings.TrimSpace(alert.Status),
+					Severity:    strings.TrimSpace(alert.Labels["severity"]),
+					Namespace:   strings.TrimSpace(alert.Labels["namespace"]),
+					PVC:         strings.TrimSpace(alert.Labels["pvc"]),
+					Kind:        strings.TrimSpace(alert.Labels["kind"]),
+					Workload:    strings.TrimSpace(alert.Labels["workload"]),
+					Summary:     strings.TrimSpace(alert.Annotations["summary"]),
+					Description: strings.TrimSpace(alert.Annotations["description"]),
+					StartsAt:    strings.TrimSpace(alert.StartsAt),
+					UpdatedAt:   strings.TrimSpace(alert.EndsAt),
+				})
+			}
+		}
+	}
+	if len(details) == 0 {
+		return nil, fmt.Errorf("alert-receiver payloads did not contain capacity alerts")
+	}
+	return details, nil
+}
+
+func validateAlertmanagerRouteConfig(statusBody, expectedReceiver, expectedIntegration string) error {
+	configText := parseAlertmanagerOriginalConfig(statusBody)
+	if configText == "" {
+		return fmt.Errorf("alertmanager status did not include config.original")
+	}
+	if expectedReceiver != "" {
+		if !strings.Contains(configText, "receiver: "+expectedReceiver) ||
+			!strings.Contains(configText, "- name: "+expectedReceiver) {
+			return fmt.Errorf("alertmanager config does not route to expected receiver %q", expectedReceiver)
+		}
+	}
+	switch strings.TrimSpace(expectedIntegration) {
+	case "", "webhook":
+		if !strings.Contains(configText, "webhook_configs:") {
+			return fmt.Errorf("alertmanager config does not include webhook integration for expected receiver")
+		}
+	}
+	return nil
+}
+
+func validateAlertMetadata(details []civerify.AlertDetail, workloads []string) error {
+	if len(details) == 0 {
+		return fmt.Errorf("no Alertmanager capacity alert details returned")
+	}
+	workloadSeen := make(map[string]struct{}, len(workloads))
+	for _, d := range details {
+		if strings.TrimSpace(d.Summary) == "" {
+			return fmt.Errorf("alert %s missing summary annotation", d.AlertName)
+		}
+		switch d.AlertName {
+		case "WorkloadBudgetBreachSoon":
+			if strings.TrimSpace(d.Namespace) == "" || strings.TrimSpace(d.Workload) == "" || strings.TrimSpace(d.Kind) == "" {
+				return fmt.Errorf("workload alert missing namespace/kind/workload labels: %+v", d)
+			}
+			workloadSeen[d.Workload] = struct{}{}
+		case "NamespaceBudgetBreachSoon":
+			if strings.TrimSpace(d.Namespace) == "" {
+				return fmt.Errorf("namespace alert missing namespace label: %+v", d)
+			}
+		case "PVCUsageHigh", "PVCUsageCritical":
+			if strings.TrimSpace(d.Namespace) == "" || strings.TrimSpace(d.PVC) == "" {
+				return fmt.Errorf("pvc alert missing namespace/pvc labels: %+v", d)
+			}
+		}
+	}
+	for _, workload := range workloads {
+		if _, ok := workloadSeen[workload]; !ok {
+			return fmt.Errorf("alertmanager missing WorkloadBudgetBreachSoon metadata for workload %q", workload)
+		}
+	}
+	return nil
+}
+
+func (r *IntegrationRunner) verifyLLMInsights(ctx context.Context) error {
+	if !r.llmEnabled() {
+		r.state.checkLLMInsights = "skipped (provider disabled)"
+		return nil
+	}
+
+	cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
+	if err != nil {
+		return fmt.Errorf("getting capacity plan for llm verification: %w", err)
+	}
+	insights := 0
+	for _, pvc := range cp.Status.PVCs {
+		if strings.TrimSpace(pvc.LLMInsight) != "" {
+			insights++
+		}
+	}
+	planInsightSections := 0
+	missingSections := make([]string, 0, 2)
+	if strings.TrimSpace(cp.Status.LLMRiskChangeSummary) != "" {
+		planInsightSections++
+	} else {
+		missingSections = append(missingSections, "llmRiskChangeSummary")
+	}
+	if strings.TrimSpace(cp.Status.LLMBudgetRecommendations) != "" {
+		planInsightSections++
+	} else {
+		missingSections = append(missingSections, "llmBudgetRecommendations")
+	}
+
+	if insights >= r.cfg.LLMMinInsights && planInsightSections == 2 {
+		r.state.checkLLMInsights = fmt.Sprintf("pass (pvcInsights=%d planInsights=%d/2)", insights, planInsightSections)
+		return nil
+	}
+
+	metricsBody, metricsErr := httpBody(ctx, "http://127.0.0.1:18080/metrics", 5*time.Second)
+	timeoutCount := 0.0
+	if metricsErr == nil {
+		timeoutCount = parsePrometheusCounterSum(metricsBody, "capacityplan_llm_timeouts_total")
+	}
+	if timeoutCount > 0 && r.cfg.LLMTimeoutHardFail {
+		return fmt.Errorf("llm model timed out %.0f times (hard-fail enabled)", timeoutCount)
+	}
+
+	reasonParts := make([]string, 0, 3)
+	if insights < r.cfg.LLMMinInsights {
+		reasonParts = append(reasonParts, fmt.Sprintf("pvcInsights=%d below required=%d", insights, r.cfg.LLMMinInsights))
+	} else {
+		reasonParts = append(reasonParts, fmt.Sprintf("pvcInsights=%d", insights))
+	}
+	if planInsightSections < 2 {
+		reasonParts = append(reasonParts, fmt.Sprintf("missingPlanInsights=%s", strings.Join(missingSections, ",")))
+	}
+	if timeoutCount > 0 {
+		reasonParts = append(reasonParts, fmt.Sprintf("timeouts=%.0f", timeoutCount))
+	}
+	if metricsErr != nil {
+		reasonParts = append(reasonParts, fmt.Sprintf("metricsReadErr=%v", metricsErr))
+	}
+	reason := strings.Join(reasonParts, ", ")
+
+	if r.cfg.LLMSoftFail {
+		r.state.checkLLMInsights = "warn (" + reason + ")"
+		fmt.Printf("LLM verification warning: %s\n", reason)
+		return nil
+	}
+	return fmt.Errorf("llm verification failed: %s", reason)
 }
 
 func (r *IntegrationRunner) verifyAlertPipeline(ctx context.Context) error {
 	logStep("Checking Alertmanager readiness endpoint")
 	if err := r.startAlertmanagerPortForward(ctx); err != nil {
 		return err
+	}
+	expectedIntegration := strings.TrimSpace(r.cfg.AlertmanagerExpectedIntegration)
+	if expectedIntegration == "" || expectedIntegration == "webhook" {
+		if err := r.startAlertReceiverPortForward(ctx); err != nil {
+			return err
+		}
 	}
 
 	logStep("Verifying alert pipeline (Prometheus + workload + Alertmanager)")

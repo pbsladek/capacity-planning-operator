@@ -42,6 +42,21 @@ func (m *MockInsightGenerator) GenerateInsight(_ context.Context, pvc PVCContext
 	return "mock insight for " + pvc.Namespace + "/" + pvc.Name, nil
 }
 
+// GenerateFromPrompt records a generic prompt execution and returns the same
+// configured Response/Err behavior used for PVC insights.
+func (m *MockInsightGenerator) GenerateFromPrompt(_ context.Context, _ PromptParts) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CallCount++
+	if m.Err != nil {
+		return "", m.Err
+	}
+	if m.Response != "" {
+		return m.Response, nil
+	}
+	return "mock plan insight", nil
+}
+
 // SetErr sets the error that GenerateInsight will return. Safe for concurrent use.
 func (m *MockInsightGenerator) SetErr(err error) {
 	m.mu.Lock()

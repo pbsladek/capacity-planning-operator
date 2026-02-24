@@ -75,10 +75,10 @@ type LLMProviderSpec struct {
 	// Provider selects the backend implementation.
 	// +optional
 	// +kubebuilder:default="disabled"
-	// +kubebuilder:validation:Enum=disabled;openai;anthropic;fastapi
+	// +kubebuilder:validation:Enum=disabled;openai;anthropic;fastapi;ollama
 	Provider string `json:"provider,omitempty"`
 
-	// Model is the model identifier used by OpenAI/Anthropic/FastAPI backends.
+	// Model is the model identifier used by OpenAI/Anthropic/FastAPI/Ollama backends.
 	// +optional
 	Model string `json:"model,omitempty"`
 
@@ -118,6 +118,10 @@ type LLMProviderSpec struct {
 	// FastAPI provider settings.
 	// +optional
 	FastAPI FastAPIProviderSpec `json:"fastapi,omitempty"`
+
+	// Ollama provider settings.
+	// +optional
+	Ollama OllamaProviderSpec `json:"ollama,omitempty"`
 }
 
 // OpenAIProviderSpec contains OpenAI backend settings.
@@ -192,6 +196,13 @@ type FastAPIProviderSpec struct {
 	// +optional
 	// +kubebuilder:default="1m"
 	Cooldown metav1.Duration `json:"cooldown,omitempty"`
+}
+
+// OllamaProviderSpec contains in-cluster Ollama backend settings.
+type OllamaProviderSpec struct {
+	// URL is the Ollama base URL (for example: http://ollama.llm.svc.cluster.local:11434).
+	// +optional
+	URL string `json:"url,omitempty"`
 }
 
 // ThresholdSpec defines usage thresholds that trigger alert conditions.
@@ -322,6 +333,15 @@ type CapacityPlanStatus struct {
 	// +optional
 	RiskChangeSummary string `json:"riskChangeSummary,omitempty"`
 
+	// LLMRiskChangeSummary is a plan-level LLM narrative explaining major
+	// risk transitions and likely drivers.
+	// +optional
+	LLMRiskChangeSummary string `json:"llmRiskChangeSummary,omitempty"`
+
+	// LastLLMRiskChangeTime is when LLMRiskChangeSummary was last generated.
+	// +optional
+	LastLLMRiskChangeTime *metav1.Time `json:"lastLLMRiskChangeTime,omitempty"`
+
 	// RiskSnapshotHash is a digest of the current TopRisks set for change detection.
 	// +optional
 	RiskSnapshotHash string `json:"riskSnapshotHash,omitempty"`
@@ -333,6 +353,16 @@ type CapacityPlanStatus struct {
 	// WorkloadForecasts contains workload-level budget forecasts.
 	// +optional
 	WorkloadForecasts []StorageBudgetForecast `json:"workloadForecasts,omitempty"`
+
+	// LLMBudgetRecommendations is a plan-level LLM output with actionable
+	// storage budget recommendations.
+	// +optional
+	LLMBudgetRecommendations string `json:"llmBudgetRecommendations,omitempty"`
+
+	// LastLLMBudgetRecommendationsTime is when LLMBudgetRecommendations
+	// was last generated.
+	// +optional
+	LastLLMBudgetRecommendationsTime *metav1.Time `json:"lastLLMBudgetRecommendationsTime,omitempty"`
 
 	// Anomalies contains detected growth-behavior anomalies.
 	// +optional

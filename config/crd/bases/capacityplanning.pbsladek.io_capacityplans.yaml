@@ -178,9 +178,16 @@ spec:
                     minimum: 1
                     type: integer
                   model:
-                    description: Model is the model identifier used by OpenAI/Anthropic/FastAPI
+                    description: Model is the model identifier used by OpenAI/Anthropic/FastAPI/Ollama
                       backends.
                     type: string
+                  ollama:
+                    description: Ollama provider settings.
+                    properties:
+                      url:
+                        description: 'URL is the Ollama base URL (for example: http://ollama.llm.svc.cluster.local:11434).'
+                        type: string
+                    type: object
                   onlyAlertingPVCs:
                     default: false
                     description: |-
@@ -212,6 +219,7 @@ spec:
                     - openai
                     - anthropic
                     - fastapi
+                    - ollama
                     type: string
                   temperature:
                     description: Temperature controls sampling randomness. Nil uses
@@ -393,10 +401,31 @@ spec:
                   - type
                   type: object
                 type: array
+              lastLLMBudgetRecommendationsTime:
+                description: |-
+                  LastLLMBudgetRecommendationsTime is when LLMBudgetRecommendations
+                  was last generated.
+                format: date-time
+                type: string
+              lastLLMRiskChangeTime:
+                description: LastLLMRiskChangeTime is when LLMRiskChangeSummary was
+                  last generated.
+                format: date-time
+                type: string
               lastReconcileTime:
                 description: LastReconcileTime is when the CapacityPlan controller
                   last ran successfully.
                 format: date-time
+                type: string
+              llmBudgetRecommendations:
+                description: |-
+                  LLMBudgetRecommendations is a plan-level LLM output with actionable
+                  storage budget recommendations.
+                type: string
+              llmRiskChangeSummary:
+                description: |-
+                  LLMRiskChangeSummary is a plan-level LLM narrative explaining major
+                  risk transitions and likely drivers.
                 type: string
               namespaceForecasts:
                 description: NamespaceForecasts contains namespace-level budget forecasts.

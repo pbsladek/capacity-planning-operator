@@ -162,6 +162,15 @@ var (
 		[]string{"provider", "model"},
 	)
 
+	// LLMTimeoutsTotal counts LLM insight generation timeouts.
+	LLMTimeoutsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "capacityplan_llm_timeouts_total",
+			Help: "Total LLM insight generation requests that timed out.",
+		},
+		[]string{"provider", "model"},
+	)
+
 	// LLMLatencySeconds observes LLM request latency.
 	LLMLatencySeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -192,6 +201,7 @@ func init() {
 		PVCSamplesCount,
 		LLMRequestsTotal,
 		LLMErrorsTotal,
+		LLMTimeoutsTotal,
 		LLMLatencySeconds,
 	)
 }

@@ -1,0 +1,23 @@
+apiVersion: capacityplanning.pbsladek.io/v1
+kind: CapacityPlan
+metadata:
+  name: sample-plan-ollama
+spec:
+  namespaces:
+    - default
+  sampleRetention: 720
+  reconcileInterval: "1h"
+  sampleInterval: "30s"
+  prometheusURL: "http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090"
+  thresholds:
+    usageRatio: "0.85"
+    daysUntilFull: 7
+  llmInsightsInterval: "6h"
+  llm:
+    provider: "ollama"
+    model: "mistral:7b"
+    timeout: "90s"
+    maxTokens: 256
+    onlyAlertingPVCs: false
+    ollama:
+      url: "http://ollama.llm.svc.cluster.local:11434"
