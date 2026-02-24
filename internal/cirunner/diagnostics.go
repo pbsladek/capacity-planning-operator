@@ -14,6 +14,7 @@ import (
 	capacityv1 "github.com/pbsladek/capacity-planning-operator/api/v1"
 	"github.com/pbsladek/capacity-planning-operator/internal/civerify"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -65,8 +66,12 @@ func (r *DiagnosticsRunner) writeCapture(path string, fn func() (string, error))
 	_ = writeFile(path, content)
 }
 
-func getPodLogs(ctx context.Context, c *Clients, namespace, pod string, tail int64) (string, error) {
-	req := c.Clientset.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{TailLines: &tail})
+func getPodLogs(ctx context.Context, c *Clients, namespace, pod, container string, tail int64) (string, error) {
+	opts := &corev1.PodLogOptions{TailLines: &tail}
+	if strings.TrimSpace(container) != "" {
+		opts.Container = container
+	}
+	req := c.Clientset.CoreV1().Pods(namespace).GetLogs(pod, opts)
 	stream, err := req.Stream(ctx)
 	if err != nil {
 		return "", err
@@ -77,6 +82,33 @@ func getPodLogs(ctx context.Context, c *Clients, namespace, pod string, tail int
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func getPodLogsIfExists(ctx context.Context, c *Clients, namespace, pod, container string, tail int64) (string, error) {
+	currentPod, err := c.Clientset.CoreV1().Pods(namespace).Get(ctx, pod, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Sprintf("pod %s/%s not found\n", namespace, pod), nil
+		}
+		return "", err
+	}
+
+	if strings.TrimSpace(container) != "" {
+		found := false
+		available := make([]string, 0, len(currentPod.Spec.Containers))
+		for _, ctr := range currentPod.Spec.Containers {
+			available = append(available, ctr.Name)
+			if ctr.Name == container {
+				found = true
+			}
+		}
+		if !found {
+			sort.Strings(available)
+			return fmt.Sprintf("container %q not found in pod %s/%s (available: %s)\n", container, namespace, pod, strings.Join(available, ", ")), nil
+		}
+	}
+
+	return getPodLogs(ctx, c, namespace, pod, container, tail)
 }
 
 func httpGET(ctx context.Context, url string, timeout time.Duration) (string, error) {
@@ -309,9 +341,16 @@ func (r *DiagnosticsRunner) captureOperatorAndMonitoring(ctx context.Context, ou
 	r.writeCapture(filepath.Join(outDir, "operator", "manager-logs.txt"), func() (string, error) {
 		pod := deploymentPodName(ctx, r.clients, r.cfg.OpNamespace, map[string]string{"control-plane": "controller-manager"})
 		if pod == "" {
-			return "", fmt.Errorf("manager pod not found")
+			deployments, err := r.clients.Clientset.AppsV1().Deployments(r.cfg.OpNamespace).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				return "", err
+			}
+			if len(deployments.Items) == 0 {
+				return fmt.Sprintf("operator deployment not found in namespace %s\n", r.cfg.OpNamespace), nil
+			}
+			return fmt.Sprintf("manager pod not found in namespace %s for selector control-plane=controller-manager\n", r.cfg.OpNamespace), nil
 		}
-		return getPodLogs(ctx, r.clients, r.cfg.OpNamespace, pod, 1200)
+		return getPodLogsIfExists(ctx, r.clients, r.cfg.OpNamespace, pod, "manager", 1200)
 	})
 
 	// Monitoring namespace captures.
@@ -340,16 +379,19 @@ func (r *DiagnosticsRunner) captureOperatorAndMonitoring(ctx context.Context, ou
 	})
 	r.writeCapture(filepath.Join(outDir, "monitoring", "operator-logs.txt"), func() (string, error) {
 		list, err := r.clients.Clientset.CoreV1().Pods(r.cfg.MonitoringNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=kube-prometheus-stack-operator"})
-		if err != nil || len(list.Items) == 0 {
-			return "", fmt.Errorf("monitoring operator pod not found")
+		if err != nil {
+			return "", err
 		}
-		return getPodLogs(ctx, r.clients, r.cfg.MonitoringNamespace, list.Items[0].Name, 1200)
+		if len(list.Items) == 0 {
+			return fmt.Sprintf("monitoring operator pod not found in namespace %s\n", r.cfg.MonitoringNamespace), nil
+		}
+		return getPodLogsIfExists(ctx, r.clients, r.cfg.MonitoringNamespace, list.Items[0].Name, "kube-prometheus-stack", 1200)
 	})
 	r.writeCapture(filepath.Join(outDir, "monitoring", "prometheus-logs.txt"), func() (string, error) {
-		return getPodLogs(ctx, r.clients, r.cfg.MonitoringNamespace, "prometheus-kube-prometheus-stack-prometheus-0", 1200)
+		return getPodLogsIfExists(ctx, r.clients, r.cfg.MonitoringNamespace, "prometheus-kube-prometheus-stack-prometheus-0", "prometheus", 1200)
 	})
 	r.writeCapture(filepath.Join(outDir, "monitoring", "alertmanager-logs.txt"), func() (string, error) {
-		return getPodLogs(ctx, r.clients, r.cfg.MonitoringNamespace, "alertmanager-kube-prometheus-stack-alertmanager-0", 1200)
+		return getPodLogsIfExists(ctx, r.clients, r.cfg.MonitoringNamespace, "alertmanager-kube-prometheus-stack-alertmanager-0", "alertmanager", 1200)
 	})
 }
 

@@ -2,7 +2,6 @@ package cirunner
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,14 +49,35 @@ func waitUntil(ctx context.Context, timeout, interval time.Duration, description
 	if interval <= 0 {
 		interval = 1 * time.Second
 	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	deadline := time.Now().Add(timeout)
 
-	tick := time.NewTicker(interval)
-	defer tick.Stop()
+	// Each poll gets its own bounded context instead of sharing one global deadline
+	// context. This avoids client-go rate limiter waits failing near timeout.
+	perAttemptTimeout := interval
+	if perAttemptTimeout < 5*time.Second {
+		perAttemptTimeout = 5 * time.Second
+	}
+	if perAttemptTimeout > 30*time.Second {
+		perAttemptTimeout = 30 * time.Second
+	}
 
 	for {
-		ok, err := check(deadlineCtx)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("waiting for %s cancelled: %w", description, err)
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("timed out waiting for %s after %s", description, timeout)
+		}
+
+		attemptTimeout := perAttemptTimeout
+		if remaining < attemptTimeout {
+			attemptTimeout = remaining
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		ok, err := check(attemptCtx)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("%s: %w", description, err)
 		}
@@ -65,13 +85,20 @@ func waitUntil(ctx context.Context, timeout, interval time.Duration, description
 			return nil
 		}
 
+		remaining = time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("timed out waiting for %s after %s", description, timeout)
+		}
+		sleep := interval
+		if remaining < sleep {
+			sleep = remaining
+		}
+		timer := time.NewTimer(sleep)
 		select {
-		case <-deadlineCtx.Done():
-			if errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
-				return fmt.Errorf("timed out waiting for %s after %s", description, timeout)
-			}
-			return fmt.Errorf("waiting for %s cancelled: %w", description, deadlineCtx.Err())
-		case <-tick.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("waiting for %s cancelled: %w", description, ctx.Err())
+		case <-timer.C:
 		}
 	}
 }

@@ -1581,6 +1581,15 @@ func (r *IntegrationRunner) setupMonitoring(ctx context.Context) error {
 	if rolloutTimeout <= 0 {
 		rolloutTimeout = 10 * time.Minute
 	}
+	bootstrapTimeout := 3 * time.Minute
+	if rolloutTimeout < bootstrapTimeout {
+		bootstrapTimeout = rolloutTimeout
+	}
+
+	logStep("Waiting for kube-system bootstrap readiness")
+	if err := waitForKubeSystemBootstrap(ctx, r.clients, bootstrapTimeout, r.cfg.PollInterval()); err != nil {
+		return err
+	}
 
 	logStep("Installing kube-prometheus-stack")
 	if err := r.installKubePrometheusStack(ctx); err != nil {

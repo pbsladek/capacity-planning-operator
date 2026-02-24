@@ -43,6 +43,13 @@ func BuildClients() (*Clients, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building rest config: %w", err)
 	}
+	restCfg = rest.CopyConfig(restCfg)
+	if restCfg.QPS == 0 {
+		restCfg.QPS = 50
+	}
+	if restCfg.Burst == 0 {
+		restCfg.Burst = 100
+	}
 
 	clientset, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {

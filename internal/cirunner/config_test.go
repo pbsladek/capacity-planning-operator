@@ -62,7 +62,7 @@ func TestLoadConfigUsesEnvOverrides(t *testing.T) {
 	if cfg.NightlyAlertReceiverPort != 29080 {
 		t.Fatalf("NightlyAlertReceiverPort=%d", cfg.NightlyAlertReceiverPort)
 	}
-	if cfg.MonitoringRolloutTimeout != 600 {
+	if cfg.MonitoringRolloutTimeout != 900 {
 		t.Fatalf("MonitoringRolloutTimeout=%d", cfg.MonitoringRolloutTimeout)
 	}
 	if cfg.AlertmanagerExpectedReceiver != "ci-webhook" {

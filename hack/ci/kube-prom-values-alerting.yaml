@@ -8,6 +8,10 @@ alertmanager:
       group_wait: 5s
       group_interval: 15s
       repeat_interval: 1h
+      # Replace chart-default child routes (which reference receiver "null").
+      # Without this, Helm map merge can keep default routes while receivers are
+      # overridden, resulting in "undefined receiver \"null\" used in route".
+      routes: []
     receivers:
       - name: ci-webhook
         webhook_configs:

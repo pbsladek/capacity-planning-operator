@@ -92,6 +92,72 @@ func waitForStatefulSetRollout(ctx context.Context, c *Clients, namespace, name 
 	return nil
 }
 
+func waitForKubeSystemBootstrap(ctx context.Context, c *Clients, timeout, interval time.Duration) error {
+	return waitUntil(ctx, timeout, interval, "kube-system bootstrap readiness", func(ctx context.Context) (bool, error) {
+		nodes, err := c.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, nil
+		}
+		if len(nodes.Items) == 0 {
+			return false, nil
+		}
+		readyNodes := 0
+		for _, node := range nodes.Items {
+			for _, cond := range node.Status.Conditions {
+				if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
+					readyNodes++
+					break
+				}
+			}
+		}
+		if readyNodes != len(nodes.Items) {
+			return false, nil
+		}
+
+		coredns, err := c.Clientset.AppsV1().Deployments("kube-system").Get(ctx, "coredns", metav1.GetOptions{})
+		if err != nil {
+			return false, nil
+		}
+		desired, updated, ready, available, unavailable := deploymentRolloutStatus(coredns)
+		if desired <= 0 || coredns.Status.ObservedGeneration < coredns.Generation {
+			return false, nil
+		}
+		if updated < desired || ready < desired || available < desired || unavailable != 0 {
+			return false, nil
+		}
+
+		daemonSets, err := c.Clientset.AppsV1().DaemonSets("kube-system").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, nil
+		}
+		for _, ds := range daemonSets.Items {
+			if !daemonSetLooksLikeFlannel(&ds) {
+				continue
+			}
+			if ds.Status.ObservedGeneration < ds.Generation {
+				return false, nil
+			}
+			if ds.Status.DesiredNumberScheduled > 0 && ds.Status.NumberReady < ds.Status.DesiredNumberScheduled {
+				return false, nil
+			}
+		}
+
+		return true, nil
+	})
+}
+
+func daemonSetLooksLikeFlannel(ds *appsv1.DaemonSet) bool {
+	if strings.Contains(ds.Name, "flannel") {
+		return true
+	}
+	for k, v := range ds.Labels {
+		if strings.Contains(k, "flannel") || strings.Contains(v, "flannel") {
+			return true
+		}
+	}
+	return false
+}
+
 func statefulSetRolloutReady(sts *appsv1.StatefulSet) (bool, string) {
 	desired := int32(1)
 	if sts.Spec.Replicas != nil {
