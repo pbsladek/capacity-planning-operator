@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 )
 
 type integrationState struct {
@@ -563,13 +564,50 @@ func (r *IntegrationRunner) installKubePrometheusStack(ctx context.Context) erro
 }
 
 func (r *IntegrationRunner) ensureManagerDeployment(ctx context.Context, dep *appsv1.Deployment) error {
-	updated := dep.DeepCopy()
-	if len(updated.Spec.Template.Spec.Containers) == 0 {
-		return fmt.Errorf("manager deployment has no containers")
+	if dep == nil {
+		return fmt.Errorf("manager deployment is nil")
 	}
-	container := &updated.Spec.Template.Spec.Containers[0]
-	container.Image = r.cfg.OperatorImage
-	container.ImagePullPolicy = "Never"
+	name := strings.TrimSpace(dep.Name)
+	if name == "" {
+		return fmt.Errorf("manager deployment name is empty")
+	}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := r.clients.Clientset.AppsV1().Deployments(r.cfg.OpNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		updated := current.DeepCopy()
+		changed, err := r.applyManagerDeploymentSettings(updated)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			return nil
+		}
+		_, err = r.clients.Clientset.AppsV1().Deployments(r.cfg.OpNamespace).Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("updating manager deployment: %w", err)
+	}
+	return nil
+}
+
+func (r *IntegrationRunner) applyManagerDeploymentSettings(dep *appsv1.Deployment) (bool, error) {
+	if len(dep.Spec.Template.Spec.Containers) == 0 {
+		return false, fmt.Errorf("manager deployment has no containers")
+	}
+	changed := false
+	container := &dep.Spec.Template.Spec.Containers[0]
+	if container.Image != r.cfg.OperatorImage {
+		container.Image = r.cfg.OperatorImage
+		changed = true
+	}
+	if container.ImagePullPolicy != corev1.PullNever {
+		container.ImagePullPolicy = corev1.PullNever
+		changed = true
+	}
 
 	needArgs := map[string]struct{}{
 		"--metrics-bind-address=:8080":                    {},
@@ -582,18 +620,23 @@ func (r *IntegrationRunner) ensureManagerDeployment(ctx context.Context, dep *ap
 	}
 	for arg := range needArgs {
 		container.Args = append(container.Args, arg)
+		changed = true
 	}
+
+	sortedArgs := append([]string(nil), container.Args...)
 	sort.Strings(container.Args)
-
-	if updated.Spec.Template.Spec.ServiceAccountName == "" {
-		updated.Spec.Template.Spec.ServiceAccountName = "k8s-operator-controller-manager"
+	for i := range sortedArgs {
+		if sortedArgs[i] != container.Args[i] {
+			changed = true
+			break
+		}
 	}
 
-	_, err := r.clients.Clientset.AppsV1().Deployments(r.cfg.OpNamespace).Update(ctx, updated, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("updating manager deployment: %w", err)
+	if dep.Spec.Template.Spec.ServiceAccountName == "" {
+		dep.Spec.Template.Spec.ServiceAccountName = "k8s-operator-controller-manager"
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 func httpBody(ctx context.Context, url string, timeout time.Duration) (string, error) {
