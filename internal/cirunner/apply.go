@@ -230,19 +230,30 @@ func ApplyOperatorManifests(ctx context.Context, c *Clients) error {
 }
 
 func ApplyWorkloadManifests(ctx context.Context, c *Clients, manifestDir string) error {
+	if err := ApplyWorkloadStorageManifests(ctx, c, manifestDir); err != nil {
+		return err
+	}
+	return ApplyWorkloadPodManifests(ctx, c, manifestDir)
+}
+
+func ApplyWorkloadStorageManifests(ctx context.Context, c *Clients, manifestDir string) error {
 	mapper := c.DiscoveryMapper()
 	workloadsDir := filepath.Join(manifestDir, "workloads")
 	files := []string{
-		filepath.Join(workloadsDir, "pv-steady.yaml"),
-		filepath.Join(workloadsDir, "pv-bursty.yaml"),
-		filepath.Join(workloadsDir, "pv-trickle.yaml"),
-		filepath.Join(workloadsDir, "pv-churn.yaml"),
-		filepath.Join(workloadsDir, "pv-delayed.yaml"),
+		filepath.Join(workloadsDir, "storageclass-ci-local-path.yaml"),
 		filepath.Join(workloadsDir, "pvc-steady.yaml"),
 		filepath.Join(workloadsDir, "pvc-bursty.yaml"),
 		filepath.Join(workloadsDir, "pvc-trickle.yaml"),
 		filepath.Join(workloadsDir, "pvc-churn.yaml"),
 		filepath.Join(workloadsDir, "pvc-delayed.yaml"),
+	}
+	return applyFiles(ctx, c, mapper, files, nil)
+}
+
+func ApplyWorkloadPodManifests(ctx context.Context, c *Clients, manifestDir string) error {
+	mapper := c.DiscoveryMapper()
+	workloadsDir := filepath.Join(manifestDir, "workloads")
+	files := []string{
 		filepath.Join(workloadsDir, "pod-steady.yaml"),
 		filepath.Join(workloadsDir, "pod-bursty.yaml"),
 		filepath.Join(workloadsDir, "pod-trickle.yaml"),

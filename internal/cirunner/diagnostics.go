@@ -141,6 +141,9 @@ func (r *DiagnosticsRunner) capturePrometheusAPI(ctx context.Context, outDir str
 		"query_capacity_alerts.json":       `ALERTS{alertname=~"PVCUsageHigh|PVCUsageCritical|NamespaceBudgetBreachSoon|WorkloadBudgetBreachSoon",alertstate=~"pending|firing"}`,
 		"query_up_controller_manager.json": `up{job=~".*controller-manager.*"}`,
 		"query_capacity_metrics.json":      `{__name__=~"capacityplan_.*"}`,
+		"query_kubelet_pvc_used.json":      `kubelet_volume_stats_used_bytes{namespace="default"}`,
+		"query_kubelet_pvc_capacity.json":  `kubelet_volume_stats_capacity_bytes{namespace="default"}`,
+		"query_pvc_request_bytes.json":     `kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace="default"}`,
 	}
 	for file, query := range queries {
 		q := query

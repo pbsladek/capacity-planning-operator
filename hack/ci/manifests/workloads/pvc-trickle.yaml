@@ -6,8 +6,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: ci-hostpath
-  volumeName: cpo-ci-trickle-pv
+  storageClassName: cpo-ci-local-path
   resources:
     requests:
       storage: 500Mi

@@ -138,29 +138,111 @@ func runCommand(ctx context.Context, name string, args ...string) error {
 	return cmd.Run()
 }
 
-func (r *IntegrationRunner) prepareDedicatedPVCBackends(ctx context.Context) error {
+type pvcBackendMount struct {
+	NodeName string
+	Path     string
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (r *IntegrationRunner) resolvePVCBackendMounts(ctx context.Context, namespace string, pvcNames []string) ([]pvcBackendMount, error) {
+	mounts := make([]pvcBackendMount, 0, len(pvcNames))
+	pathOwner := make(map[string]string, len(pvcNames))
+	for _, pvcName := range pvcNames {
+		pvc, err := r.clients.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("getting pvc %s/%s: %w", namespace, pvcName, err)
+		}
+		if pvc.Spec.VolumeName == "" {
+			return nil, fmt.Errorf("pvc %s/%s has no bound volumeName", namespace, pvcName)
+		}
+		pv, err := r.clients.Clientset.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("getting pv %s for pvc %s/%s: %w", pvc.Spec.VolumeName, namespace, pvcName, err)
+		}
+		if pv.Spec.HostPath == nil || strings.TrimSpace(pv.Spec.HostPath.Path) == "" {
+			return nil, fmt.Errorf("pv %s for pvc %s/%s is not hostPath-backed", pv.Name, namespace, pvcName)
+		}
+		hostPath := strings.TrimSpace(pv.Spec.HostPath.Path)
+		if owner, exists := pathOwner[hostPath]; exists && owner != pvcName {
+			return nil, fmt.Errorf(
+				"duplicate hostPath backend %q resolved for pvc %s and pvc %s; each PVC must have a unique backend path",
+				hostPath, owner, pvcName,
+			)
+		}
+		pathOwner[hostPath] = pvcName
+		targetNode := ""
+		if pv.Spec.NodeAffinity != nil && pv.Spec.NodeAffinity.Required != nil {
+			for _, term := range pv.Spec.NodeAffinity.Required.NodeSelectorTerms {
+				for _, expr := range term.MatchExpressions {
+					if expr.Key == corev1.LabelHostname && expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) > 0 {
+						targetNode = strings.TrimSpace(expr.Values[0])
+						break
+					}
+				}
+				if targetNode != "" {
+					break
+				}
+			}
+		}
+		mounts = append(mounts, pvcBackendMount{NodeName: targetNode, Path: hostPath})
+	}
+	return mounts, nil
+}
+
+func (r *IntegrationRunner) prepareDedicatedPVCBackends(ctx context.Context, mounts []pvcBackendMount) error {
 	nodes, err := discoverK3DNodes(ctx, r.cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("discovering k3d nodes: %w", err)
 	}
-	pvcs := pvcNames(r.cfg.CIWorkloads)
-	if len(pvcs) == 0 {
-		return fmt.Errorf("no CI PVC names configured")
+	nodeSet := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		nodeSet[n] = struct{}{}
+	}
+	pathsByNode := make(map[string][]string, len(nodes))
+	for _, m := range mounts {
+		if _, ok := nodeSet[m.NodeName]; ok && m.NodeName != "" {
+			pathsByNode[m.NodeName] = append(pathsByNode[m.NodeName], m.Path)
+			continue
+		}
+		for _, n := range nodes {
+			pathsByNode[n] = append(pathsByNode[n], m.Path)
+		}
 	}
 	script := `
 set -eu
-for pvc in "$@"; do
-  dir="/var/lib/rancher/k3s/storage/cpo-ci-pv/${pvc}"
+for dir in "$@"; do
   mkdir -p "$dir"
   if grep -qs " ${dir} " /proc/mounts; then
     umount "$dir"
   fi
   mount -t tmpfs -o size=500m tmpfs "$dir"
+  chmod 0777 "$dir"
 done
 `
 	for _, node := range nodes {
+		paths := uniqueStrings(pathsByNode[node])
+		if len(paths) == 0 {
+			continue
+		}
 		args := []string{"exec", node, "sh", "-ceu", script, "--"}
-		args = append(args, pvcs...)
+		args = append(args, paths...)
 		if _, err := commandOutput(ctx, "docker", args...); err != nil {
 			return fmt.Errorf("preparing PVC mount backends on %s: %w", node, err)
 		}
@@ -841,19 +923,25 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 	}
 	r.state.checkManagerRollout = "pass"
 
-	logStep("Preparing dedicated PVC backends for kubelet volume metrics")
-	if err := r.prepareDedicatedPVCBackends(ctx); err != nil {
-		return err
-	}
-
 	logStep("Creating PVC workload and CapacityPlan")
-	if err := ApplyWorkloadManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
-		return err
-	}
-	if err := waitForPodsScheduled(ctx, r.clients, "default", r.cfg.CIWorkloads, 3*time.Minute, r.cfg.PollInterval()); err != nil {
+	if err := ApplyWorkloadStorageManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
 		return err
 	}
 	if err := waitForPVCsBound(ctx, r.clients, "default", pvcNames(r.cfg.CIWorkloads), 5*time.Minute, r.cfg.PollInterval()); err != nil {
+		return err
+	}
+	logStep("Preparing dedicated PVC backends for kubelet volume metrics")
+	mounts, err := r.resolvePVCBackendMounts(ctx, "default", pvcNames(r.cfg.CIWorkloads))
+	if err != nil {
+		return err
+	}
+	if err := r.prepareDedicatedPVCBackends(ctx, mounts); err != nil {
+		return err
+	}
+	if err := ApplyWorkloadPodManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
+		return err
+	}
+	if err := waitForPodsScheduled(ctx, r.clients, "default", r.cfg.CIWorkloads, 3*time.Minute, r.cfg.PollInterval()); err != nil {
 		return err
 	}
 	if err := ApplyCapacityPlan(ctx, r.clients, r.cfg); err != nil {
