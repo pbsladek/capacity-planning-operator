@@ -233,6 +233,11 @@ func ApplyWorkloadManifests(ctx context.Context, c *Clients, manifestDir string)
 	mapper := c.DiscoveryMapper()
 	workloadsDir := filepath.Join(manifestDir, "workloads")
 	files := []string{
+		filepath.Join(workloadsDir, "pv-steady.yaml"),
+		filepath.Join(workloadsDir, "pv-bursty.yaml"),
+		filepath.Join(workloadsDir, "pv-trickle.yaml"),
+		filepath.Join(workloadsDir, "pv-churn.yaml"),
+		filepath.Join(workloadsDir, "pv-delayed.yaml"),
 		filepath.Join(workloadsDir, "pvc-steady.yaml"),
 		filepath.Join(workloadsDir, "pvc-bursty.yaml"),
 		filepath.Join(workloadsDir, "pvc-trickle.yaml"),
@@ -271,11 +276,11 @@ func ApplyCapacityPlan(ctx context.Context, c *Clients, cfg Config) error {
 					{Namespace: "default", Budget: "1600Mi"},
 				},
 				WorkloadBudgets: []capacityv1.WorkloadBudgetSpec{
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-steady", Budget: "256Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-bursty", Budget: "256Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-trickle", Budget: "256Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-churn", Budget: "256Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-delayed", Budget: "256Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-steady", Budget: "500Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-bursty", Budget: "500Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-trickle", Budget: "500Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-churn", Budget: "500Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-delayed", Budget: "500Mi"},
 				},
 			},
 			LLM: capacityv1.LLMProviderSpec{

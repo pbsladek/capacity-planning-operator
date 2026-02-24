@@ -15,17 +15,19 @@ import (
 	capacityv1 "github.com/pbsladek/capacity-planning-operator/api/v1"
 	"github.com/pbsladek/capacity-planning-operator/internal/civerify"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 type integrationState struct {
-	startedAt      time.Time
-	obsStartedAt   time.Time
-	obsFinishedAt  time.Time
-	snapshots      int
-	maxGrowingPVCs int
+	startedAt                    time.Time
+	obsStartedAt                 time.Time
+	obsFinishedAt                time.Time
+	snapshots                    int
+	maxGrowingPVCs               int
+	sawCapacityToRequestMismatch bool
 
 	checkContext        string
 	checkPromEndpoint   string
@@ -108,7 +110,7 @@ func (r *IntegrationRunner) renderValidationReport() {
 		PrometheusEndpoint:         r.state.checkPromEndpoint,
 		ManagerRollout:             r.state.checkManagerRollout,
 		PlanReconcile:              r.state.checkPlanReconcile,
-		TrendSignal:                fmt.Sprintf("%s (snapshots=%d, peakGrowingPVCs=%d)", r.state.checkTrendSignal, r.state.snapshots, r.state.maxGrowingPVCs),
+		TrendSignal:                r.state.checkTrendSignal,
 		GrowthMathCrosscheck:       r.state.checkGrowthCompare,
 		PromRuleContent:            r.state.checkPromRule,
 		ManagerMetrics:             r.state.checkManagerMetrics,
@@ -121,6 +123,9 @@ func (r *IntegrationRunner) renderValidationReport() {
 		TotalSeconds:               totalSecs,
 	}
 	civerify.PrintValidationReport(os.Stdout, report)
+	if r.state.sawCapacityToRequestMismatch {
+		fmt.Println("Note: Prometheus kubelet volume stats capacity appears to reflect backing filesystem size (not PVC request) for at least one PVC.")
+	}
 	if err := civerify.WriteValidationReportJSON(r.cfg.ValidationReportJSON, report); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write validation report: %v\n", err)
 	}
@@ -131,6 +136,36 @@ func runCommand(ctx context.Context, name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func (r *IntegrationRunner) prepareDedicatedPVCBackends(ctx context.Context) error {
+	nodes, err := discoverK3DNodes(ctx, r.cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("discovering k3d nodes: %w", err)
+	}
+	pvcs := pvcNames(r.cfg.CIWorkloads)
+	if len(pvcs) == 0 {
+		return fmt.Errorf("no CI PVC names configured")
+	}
+	script := `
+set -eu
+for pvc in "$@"; do
+  dir="/var/lib/rancher/k3s/storage/cpo-ci-pv/${pvc}"
+  mkdir -p "$dir"
+  if grep -qs " ${dir} " /proc/mounts; then
+    umount "$dir"
+  fi
+  mount -t tmpfs -o size=500m tmpfs "$dir"
+done
+`
+	for _, node := range nodes {
+		args := []string{"exec", node, "sh", "-ceu", script, "--"}
+		args = append(args, pvcs...)
+		if _, err := commandOutput(ctx, "docker", args...); err != nil {
+			return fmt.Errorf("preparing PVC mount backends on %s: %w", node, err)
+		}
+	}
+	return nil
 }
 
 func (r *IntegrationRunner) installKubePrometheusStack(ctx context.Context) error {
@@ -297,18 +332,53 @@ func (r *IntegrationRunner) prometheusScalar(ctx context.Context, query string) 
 	return v, has
 }
 
-func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, pvcs []string) {
+func promUsedBytesQuery(namespace, pvc string) string {
+	return fmt.Sprintf(
+		`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`,
+		namespace, pvc,
+	)
+}
+
+func promCapacityBytesQuery(namespace, pvc string) string {
+	return fmt.Sprintf(
+		`max(kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace=%q,persistentvolumeclaim=%q}) or max(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q})`,
+		namespace, pvc, namespace, pvc,
+	)
+}
+
+func (r *IntegrationRunner) pvcRequestedBytes(ctx context.Context, pvcName string) (int64, bool) {
+	pvc, err := r.clients.Clientset.CoreV1().PersistentVolumeClaims("default").Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		return 0, false
+	}
+	qty, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]
+	if !ok {
+		return 0, false
+	}
+	return qty.Value(), true
+}
+
+func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, pvcs []string) int {
 	now := time.Now().UTC().Format(time.RFC3339)
 	fmt.Printf("[%s] Prometheus PVC raw snapshot (default namespace)\n", now)
-	fmt.Println("  pvc usedBytes capBytes ratio usedSeriesCount")
+	fmt.Println("  pvc usedBytes capBytes reqBytes ratio usedSeriesCount capToReq")
+	mismatchCount := 0
 	for _, pvc := range pvcs {
-		used, usedOK := r.prometheusScalar(ctx, fmt.Sprintf(`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`, "default", pvc))
-		cap, capOK := r.prometheusScalar(ctx, fmt.Sprintf(`max(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q})`, "default", pvc))
+		used, usedOK := r.prometheusScalar(ctx, promUsedBytesQuery("default", pvc))
+		cap, capOK := r.prometheusScalar(ctx, promCapacityBytesQuery("default", pvc))
 		series, seriesOK := r.prometheusScalar(ctx, fmt.Sprintf(`count(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`, "default", pvc))
+		req, reqOK := r.pvcRequestedBytes(ctx, pvc)
 
 		ratioStr := "n/a"
 		if usedOK && capOK && cap > 0 {
 			ratioStr = fmt.Sprintf("%.6f", used/cap)
+		}
+		capToReq := "n/a"
+		if capOK && reqOK && req > 0 {
+			capToReq = fmt.Sprintf("%.2f", cap/float64(req))
+			if cap/float64(req) > 4 {
+				mismatchCount++
+			}
 		}
 		usedStr := "n/a"
 		if usedOK {
@@ -322,8 +392,16 @@ func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, p
 		if seriesOK {
 			seriesStr = fmt.Sprintf("%.0f", series)
 		}
-		fmt.Printf("  %s %s %s %s %s\n", pvc, usedStr, capStr, ratioStr, seriesStr)
+		reqStr := "n/a"
+		if reqOK {
+			reqStr = fmt.Sprintf("%d", req)
+		}
+		fmt.Printf("  %s %s %s %s %s %s %s\n", pvc, usedStr, capStr, reqStr, ratioStr, seriesStr, capToReq)
 	}
+	if mismatchCount > 0 {
+		fmt.Printf("  note: %d PVC(s) have capBytes much larger than requested storage; kubelet stats likely reflect backing filesystem capacity\n", mismatchCount)
+	}
+	return mismatchCount
 }
 
 func (r *IntegrationRunner) countGrowingPVCs(cp *capacityv1.CapacityPlan) int {
@@ -347,7 +425,7 @@ func (r *IntegrationRunner) hasNonzeroUsage(cp *capacityv1.CapacityPlan) bool {
 
 func (r *IntegrationRunner) hasPrometheusNonzeroUsage(ctx context.Context, pvcs []string) bool {
 	for _, pvc := range pvcs {
-		used, ok := r.prometheusScalar(ctx, fmt.Sprintf(`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`, "default", pvc))
+		used, ok := r.prometheusScalar(ctx, promUsedBytesQuery("default", pvc))
 		if ok && used > 0 {
 			return true
 		}
@@ -400,8 +478,46 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 	if compareErr != nil {
 		return compareErr
 	}
+	r.printGrowthInterpretation(cpGrowth, summary)
 	r.state.checkGrowthCompare = fmt.Sprintf("pass (%d/%d matched)", summary.Matched, summary.Comparable)
 	return nil
+}
+
+func (r *IntegrationRunner) printGrowthInterpretation(cpGrowth []civerify.PVCGrowth, summary civerify.ComparisonSummary) {
+	if len(cpGrowth) == 0 {
+		return
+	}
+	minPerMin := cpGrowth[0].StatusBytesPerDay / 1440.0
+	maxPerMin := minPerMin
+	sumPerMin := 0.0
+	for _, row := range cpGrowth {
+		v := row.StatusBytesPerDay / 1440.0
+		if v < minPerMin {
+			minPerMin = v
+		}
+		if v > maxPerMin {
+			maxPerMin = v
+		}
+		sumPerMin += v
+	}
+	avgPerMin := sumPerMin / float64(len(cpGrowth))
+	maxRelDiff := 0.0
+	maxRelName := ""
+	for _, row := range summary.Rows {
+		if !row.HasPromData {
+			continue
+		}
+		if row.RelDiffPct > maxRelDiff {
+			maxRelDiff = row.RelDiffPct
+			maxRelName = row.Name
+		}
+	}
+	fmt.Println("Growth interpretation")
+	fmt.Printf("  status growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
+	fmt.Printf("  cross-check match: %d/%d PVCs within tolerances\n", summary.Matched, summary.Comparable)
+	if maxRelName != "" {
+		fmt.Printf("  largest status-vs-prometheus delta: %s (%.2f%%)\n", maxRelName, maxRelDiff)
+	}
 }
 
 func (r *IntegrationRunner) checkCapacityPlanPostConditions(ctx context.Context, firstReconcile *metav1.Time) error {
@@ -582,6 +698,7 @@ func (r *IntegrationRunner) observeTrends(ctx context.Context) error {
 	sawNonzeroUsage := false
 	maxGrowing := 0
 	snapshots := 0
+	var lastCP *capacityv1.CapacityPlan
 	for remaining > 0 {
 		interval := r.cfg.UsageSnapshotInterval
 		if interval <= 0 {
@@ -593,14 +710,19 @@ func (r *IntegrationRunner) observeTrends(ctx context.Context) error {
 		time.Sleep(time.Duration(interval) * time.Second)
 		remaining -= interval
 		snapshots++
+		fmt.Printf("  snapshot=%d elapsed=%ds remaining=%ds\n", snapshots, int(time.Since(r.state.obsStartedAt).Seconds()), remaining)
 
 		cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
 		if err != nil {
 			return fmt.Errorf("getting capacity plan during observation: %w", err)
 		}
+		lastCP = cp
 		r.printCapacitySnapshot(cp)
 		r.printGrowthSummary(cp)
-		r.printPrometheusPVCRawSnapshot(ctx, pvcs)
+		mismatchCount := r.printPrometheusPVCRawSnapshot(ctx, pvcs)
+		if mismatchCount > 0 {
+			r.state.sawCapacityToRequestMismatch = true
+		}
 
 		growing := r.countGrowingPVCs(cp)
 		fmt.Printf("  growingPVCsAboveThreshold=%d thresholdBytesPerMin=%.0f\n", growing, r.cfg.MinGrowthBytesPerMin)
@@ -638,6 +760,26 @@ func (r *IntegrationRunner) observeTrends(ctx context.Context) error {
 	r.state.obsFinishedAt = time.Now()
 	r.state.snapshots = snapshots
 	r.state.maxGrowingPVCs = maxGrowing
+	if lastCP != nil && len(lastCP.Status.PVCs) > 0 {
+		sumPerMin := 0.0
+		minPerMin := lastCP.Status.PVCs[0].GrowthBytesPerDay / 1440.0
+		maxPerMin := minPerMin
+		for _, pvc := range lastCP.Status.PVCs {
+			v := pvc.GrowthBytesPerDay / 1440.0
+			sumPerMin += v
+			if v < minPerMin {
+				minPerMin = v
+			}
+			if v > maxPerMin {
+				maxPerMin = v
+			}
+		}
+		avgPerMin := sumPerMin / float64(len(lastCP.Status.PVCs))
+		fmt.Println("Trend interpretation")
+		fmt.Printf("  sampled snapshots: %d\n", snapshots)
+		fmt.Printf("  growing PVCs above threshold: %d/%d (threshold %.0f bytes/min)\n", maxGrowing, len(lastCP.Status.PVCs), r.cfg.MinGrowthBytesPerMin)
+		fmt.Printf("  latest growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
+	}
 	r.state.checkTrendSignal = fmt.Sprintf("pass (nonzeroUsage=1, peakGrowingPVCs=%d)", maxGrowing)
 	return nil
 }
@@ -698,6 +840,11 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 		return err
 	}
 	r.state.checkManagerRollout = "pass"
+
+	logStep("Preparing dedicated PVC backends for kubelet volume metrics")
+	if err := r.prepareDedicatedPVCBackends(ctx); err != nil {
+		return err
+	}
 
 	logStep("Creating PVC workload and CapacityPlan")
 	if err := ApplyWorkloadManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {

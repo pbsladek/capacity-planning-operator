@@ -6,6 +6,8 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
+  storageClassName: ci-hostpath
+  volumeName: cpo-ci-bursty-pv
   resources:
     requests:
-      storage: 256Mi
+      storage: 500Mi

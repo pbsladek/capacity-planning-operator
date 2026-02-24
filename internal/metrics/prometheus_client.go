@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// PrometheusClient queries the Prometheus HTTP API for kubelet volume stats.
+// PrometheusClient queries the Prometheus HTTP API for kubelet/PVC usage stats.
 // It implements PVCMetricsClient.
 type PrometheusClient struct {
 	baseURL    string
@@ -35,15 +35,16 @@ func NewPrometheusClient(baseURL string) *PrometheusClient {
 	}
 }
 
-// GetUsage queries Prometheus for the current kubelet_volume_stats_used_bytes
-// and kubelet_volume_stats_capacity_bytes for the given PVC.
+// GetUsage queries Prometheus for the current PVC usage and capacity for the
+// given PVC.
 func (c *PrometheusClient) GetUsage(ctx context.Context, key PVCKey) (PVCUsage, error) {
 	usedQuery := fmt.Sprintf(
 		`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`,
 		key.Namespace, key.Name,
 	)
 	capQuery := fmt.Sprintf(
-		`max(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q})`,
+		`max(kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace=%q,persistentvolumeclaim=%q}) or max(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q})`,
+		key.Namespace, key.Name,
 		key.Namespace, key.Name,
 	)
 
@@ -58,8 +59,8 @@ func (c *PrometheusClient) GetUsage(ctx context.Context, key PVCKey) (PVCUsage, 
 	return PVCUsage{UsedBytes: used, CapacityBytes: cap}, nil
 }
 
-// GetUsageRange queries Prometheus for historical kubelet_volume_stats_used_bytes
-// for the given PVC over the specified time range and step.
+// GetUsageRange queries Prometheus for historical PVC used bytes for the given
+// PVC over the specified time range and step.
 func (c *PrometheusClient) GetUsageRange(ctx context.Context, key PVCKey, start, end time.Time, step time.Duration) ([]RangePoint, error) {
 	query := fmt.Sprintf(
 		`max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q})`,

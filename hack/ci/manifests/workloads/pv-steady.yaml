@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: cpo-ci-steady-pv
+spec:
+  capacity:
+    storage: 500Mi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: ci-hostpath
+  hostPath:
+    path: /var/lib/rancher/k3s/storage/cpo-ci-pv/cpo-ci-steady-pvc
+    type: Directory

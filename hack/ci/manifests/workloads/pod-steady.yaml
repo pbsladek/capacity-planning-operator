@@ -12,9 +12,9 @@ spec:
       args:
         - |
           set -eu
-          # Steady linear growth: 1Mi every 8s for ~6m (~45Mi).
+          # Steady linear growth: 6Mi every 8s for ~6m (~270Mi total).
           for i in $(seq 1 45); do
-            dd if=/dev/zero of="/data/steady-${i}.bin" bs=1M count=1 >/dev/null 2>&1
+            dd if=/dev/zero of="/data/steady-${i}.bin" bs=1M count=6 >/dev/null 2>&1
             sync
             sleep 8
           done

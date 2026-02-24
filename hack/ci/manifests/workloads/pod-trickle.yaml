@@ -12,9 +12,9 @@ spec:
       args:
         - |
           set -eu
-          # Slow trickle growth: 512Ki every 10s for ~6m (~16Mi).
+          # Slow trickle growth: 6Mi every 10s for ~6m (~192Mi total).
           for i in $(seq 1 32); do
-            dd if=/dev/zero of="/data/trickle-${i}.bin" bs=512K count=1 >/dev/null 2>&1
+            dd if=/dev/zero of="/data/trickle-${i}.bin" bs=1M count=6 >/dev/null 2>&1
             sync
             sleep 10
           done

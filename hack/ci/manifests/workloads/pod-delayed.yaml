@@ -12,10 +12,10 @@ spec:
       args:
         - |
           set -eu
-          # Delayed growth: short idle warm-up then sustained writes (~48Mi).
+          # Delayed growth: short idle warm-up then sustained writes (~240Mi total).
           sleep 90
           for i in $(seq 1 24); do
-            dd if=/dev/zero of="/data/delayed-${i}.bin" bs=1M count=2 >/dev/null 2>&1
+            dd if=/dev/zero of="/data/delayed-${i}.bin" bs=1M count=10 >/dev/null 2>&1
             sync
             sleep 10
           done
