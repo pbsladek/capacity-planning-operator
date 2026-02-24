@@ -283,7 +283,10 @@ Manual k3s integration workflow: `.github/workflows/k3s-integration.yaml`
 Integration harness files:
 
 - `hack/ci/k3s_integration.sh`
-- `cmd/ci-verify` (Go verification CLI used by CI script)
+- `cmd/ci-runner` (Go integration/diagnostics/import runner)
+  - `ci-runner nightly-alert-delivery` handles synthetic webhook delivery validation used by nightly.
+- `cmd/alert-receiver` (Go webhook receiver used to validate Alertmanager delivery payloads)
+- `Dockerfile.alert-receiver` (CI image build for alert receiver)
 - `hack/ci/kube-prom-values.yaml`
 - `hack/ci/manifests/workloads/` (split PVC/pod manifests + kustomization)
 - `hack/ci/manifests/capacityplan.yaml.tmpl`

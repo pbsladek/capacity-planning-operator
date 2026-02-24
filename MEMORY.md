@@ -125,6 +125,18 @@ Stabilize k3s integration/nightly alerting CI so capacity alerts are reliably ev
       - `alertmanager_notifications_failed_total{receiver,integration}` stays zero.
       - Alert metadata labels/annotations are present for workload/namespace alerts.
 
+16. Migrated alert receiver from inline Python to a Go service.
+    - New package: `internal/alertreceiver`.
+    - New binary: `cmd/alert-receiver`.
+    - New image build: `Dockerfile.alert-receiver`.
+    - CI now builds/imports a local alert receiver image (`ALERT_RECEIVER_IMAGE`) and deploys that image via runner config.
+    - `hack/ci/nightly_alert_delivery.sh` now reuses deployed receiver and validates webhook delivery via `/records` instead of parsing Python logs.
+
+17. Migrated nightly alert-delivery validator from Bash logic to Go runner command.
+    - New `ci-runner` subcommand: `nightly-alert-delivery`.
+    - New runner: `internal/cirunner/nightly_alert_delivery.go`.
+    - Script `hack/ci/nightly_alert_delivery.sh` is now a thin wrapper calling `run_ci_runner.sh nightly-alert-delivery`.
+
 ## Validation Run
 
 1. `bash -n hack/ci/k3s_integration.sh` passed.

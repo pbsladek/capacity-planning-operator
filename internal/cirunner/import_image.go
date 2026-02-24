@@ -253,7 +253,11 @@ func RunImportImageK3D(ctx context.Context, cfg Config) error {
 	}
 
 	images := []string{operatorImage}
+	if receiverImage := strings.TrimSpace(cfg.AlertReceiverImage); receiverImage != "" {
+		images = append(images, receiverImage)
+	}
 	images = append(images, parseExtraImages(os.Getenv("EXTRA_IMAGES"))...)
+	images = uniqueStrings(images)
 	if err := ensureLocalImages(ctx, images); err != nil {
 		return err
 	}

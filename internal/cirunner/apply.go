@@ -237,14 +237,35 @@ func ApplyWorkloadManifests(ctx context.Context, c *Clients, manifestDir string)
 	return ApplyWorkloadPodManifests(ctx, c, manifestDir)
 }
 
-func ApplyAlertReceiverManifests(ctx context.Context, c *Clients, manifestDir string) error {
+func ApplyAlertReceiverManifests(ctx context.Context, c *Clients, manifestDir string, cfg Config) error {
 	mapper := c.DiscoveryMapper()
 	receiverDir := filepath.Join(manifestDir, "alert-receiver")
 	files := []string{
 		filepath.Join(receiverDir, "service.yaml"),
 		filepath.Join(receiverDir, "deployment.yaml"),
 	}
-	return applyFiles(ctx, c, mapper, files, nil)
+	transform := func(obj *unstructured.Unstructured) {
+		if obj.GetKind() != "Deployment" {
+			return
+		}
+		image := strings.TrimSpace(cfg.AlertReceiverImage)
+		if image == "" {
+			return
+		}
+		var deploy appsv1.Deployment
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &deploy); err != nil {
+			return
+		}
+		for i := range deploy.Spec.Template.Spec.Containers {
+			if deploy.Spec.Template.Spec.Containers[i].Name == "receiver" {
+				deploy.Spec.Template.Spec.Containers[i].Image = image
+			}
+		}
+		if out, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&deploy); err == nil {
+			obj.Object = out
+		}
+	}
+	return applyFiles(ctx, c, mapper, files, transform)
 }
 
 func ApplyWorkloadStorageManifests(ctx context.Context, c *Clients, manifestDir string) error {

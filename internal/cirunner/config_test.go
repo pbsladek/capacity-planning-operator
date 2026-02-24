@@ -53,6 +53,15 @@ func TestLoadConfigUsesEnvOverrides(t *testing.T) {
 	if cfg.KubePromValuesExtraFile != "hack/ci/kube-prom-values-alerting.yaml" {
 		t.Fatalf("KubePromValuesExtraFile=%q", cfg.KubePromValuesExtraFile)
 	}
+	if cfg.AlertReceiverImage != "capacity-alert-receiver:ci" {
+		t.Fatalf("AlertReceiverImage=%q", cfg.AlertReceiverImage)
+	}
+	if cfg.NightlyRuleName != "ci-always-firing" {
+		t.Fatalf("NightlyRuleName=%q", cfg.NightlyRuleName)
+	}
+	if cfg.NightlyAlertReceiverPort != 29080 {
+		t.Fatalf("NightlyAlertReceiverPort=%d", cfg.NightlyAlertReceiverPort)
+	}
 	if cfg.AlertmanagerExpectedReceiver != "ci-webhook" {
 		t.Fatalf("AlertmanagerExpectedReceiver=%q", cfg.AlertmanagerExpectedReceiver)
 	}

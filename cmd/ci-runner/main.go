@@ -14,6 +14,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "  ci-runner integration\n")
 	fmt.Fprintf(os.Stderr, "  ci-runner collect-diagnostics\n")
 	fmt.Fprintf(os.Stderr, "  ci-runner import-image-k3d\n")
+	fmt.Fprintf(os.Stderr, "  ci-runner nightly-alert-delivery\n")
 }
 
 func runIntegration(args []string) error {
@@ -51,6 +52,19 @@ func runImportImageK3D(args []string) error {
 	return cirunner.RunImportImageK3D(context.Background(), cfg)
 }
 
+func runNightlyAlertDelivery(args []string) error {
+	fs := flag.NewFlagSet("nightly-alert-delivery", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg := cirunner.LoadConfig()
+	runner, err := cirunner.NewNightlyAlertDeliveryRunner(cfg)
+	if err != nil {
+		return err
+	}
+	return runner.Run(context.Background())
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -65,6 +79,8 @@ func main() {
 		err = runCollectDiagnostics(os.Args[2:])
 	case "import-image-k3d":
 		err = runImportImageK3D(os.Args[2:])
+	case "nightly-alert-delivery":
+		err = runNightlyAlertDelivery(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return

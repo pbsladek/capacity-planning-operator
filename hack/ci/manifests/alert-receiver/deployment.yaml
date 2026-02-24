@@ -17,55 +17,20 @@ spec:
     spec:
       containers:
         - name: receiver
-          image: python:3.12-alpine
+          image: capacity-alert-receiver:ci
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "-ceu"]
-          args:
-            - |
-              cat <<'PY' > /tmp/server.py
-              import json
-              import os
-              from http.server import BaseHTTPRequestHandler, HTTPServer
-
-              LOG_PATH = "/tmp/alerts.log"
-
-              def append_line(text: str) -> None:
-                  with open(LOG_PATH, "a", encoding="utf-8") as f:
-                      f.write(text.strip() + "\n")
-
-              class Handler(BaseHTTPRequestHandler):
-                  def _write(self, code: int, body: bytes, content_type: str = "application/json") -> None:
-                      self.send_response(code)
-                      self.send_header("Content-Type", content_type)
-                      self.end_headers()
-                      self.wfile.write(body)
-
-                  def do_POST(self) -> None:
-                      length = int(self.headers.get("Content-Length", "0"))
-                      raw = self.rfile.read(length).decode("utf-8", errors="replace")
-                      append_line(raw)
-                      self._write(200, b'{"ok":true}')
-
-                  def do_GET(self) -> None:
-                      if self.path.startswith("/healthz"):
-                          self._write(200, b'{"ok":true}')
-                          return
-                      if self.path.startswith("/records"):
-                          lines = []
-                          if os.path.exists(LOG_PATH):
-                              with open(LOG_PATH, "r", encoding="utf-8") as f:
-                                  lines = [ln.strip() for ln in f if ln.strip()]
-                          payload = json.dumps({"count": len(lines), "records": lines}).encode("utf-8")
-                          self._write(200, payload)
-                          return
-                      self._write(404, b'{"error":"not found"}')
-
-                  def log_message(self, fmt: str, *args) -> None:
-                      return
-
-              HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
-              PY
-              python -u /tmp/server.py
           ports:
             - containerPort: 8080
               name: http
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10

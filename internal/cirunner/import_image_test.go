@@ -6,8 +6,8 @@ import (
 )
 
 func TestParseExtraImages(t *testing.T) {
-	got := parseExtraImages("busybox:1.36, python:3.12-alpine  redis:7")
-	want := []string{"busybox:1.36", "python:3.12-alpine", "redis:7"}
+	got := parseExtraImages("busybox:1.36, capacity-alert-receiver:ci  redis:7")
+	want := []string{"busybox:1.36", "capacity-alert-receiver:ci", "redis:7"}
 	if len(got) != len(want) {
 		t.Fatalf("got=%v want=%v", got, want)
 	}

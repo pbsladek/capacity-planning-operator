@@ -1583,7 +1583,7 @@ func (r *IntegrationRunner) setupMonitoring(ctx context.Context) error {
 	}
 
 	logStep("Deploying Alertmanager webhook receiver")
-	if err := ApplyAlertReceiverManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
+	if err := ApplyAlertReceiverManifests(ctx, r.clients, r.cfg.CIManifestDir, r.cfg); err != nil {
 		return err
 	}
 	if err := waitForDeploymentRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "alert-receiver", 5*time.Minute, r.cfg.PollInterval()); err != nil {

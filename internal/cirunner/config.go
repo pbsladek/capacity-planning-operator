@@ -58,6 +58,9 @@ type Config struct {
 	LLMModelPullTimeoutSeconds      int
 	LLMNamespace                    string
 	LLMDeploymentName               string
+	AlertReceiverImage              string
+	NightlyRuleName                 string
+	NightlyAlertReceiverPort        int
 	AlertmanagerExpectedReceiver    string
 	AlertmanagerExpectedIntegration string
 }
@@ -191,6 +194,9 @@ func LoadConfig() Config {
 		LLMModelPullTimeoutSeconds:      getenvInt("CI_LLM_MODEL_PULL_TIMEOUT_SECONDS", 1200),
 		LLMNamespace:                    getenvDefault("CI_LLM_NAMESPACE", "llm"),
 		LLMDeploymentName:               getenvDefault("CI_LLM_DEPLOYMENT_NAME", "ollama"),
+		AlertReceiverImage:              getenvDefault("ALERT_RECEIVER_IMAGE", "capacity-alert-receiver:ci"),
+		NightlyRuleName:                 getenvDefault("RULE_NAME", "ci-always-firing"),
+		NightlyAlertReceiverPort:        getenvInt("ALERT_RECEIVER_PORT", 29080),
 		AlertmanagerExpectedReceiver:    getenvDefault("ALERTMANAGER_EXPECTED_RECEIVER", "ci-webhook"),
 		AlertmanagerExpectedIntegration: getenvDefault("ALERTMANAGER_EXPECTED_INTEGRATION", "webhook"),
 	}

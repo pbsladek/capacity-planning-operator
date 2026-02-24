@@ -38,6 +38,8 @@ Persistent notes for decisions, constraints, and operating context that should s
 - Added namespace/workload storage budget forecasting (`spec.budgets` -> status forecasts + breach metrics/alerts).
 - Added PVC growth anomaly detection (`acceleration_spike`, `trend_instability`, `sudden_growth`) with status + metrics + alerts.
 - CI alert pipeline validation now checks Alertmanager receiver routing + delivery counters (`notifications_total/failed_total`) and validates alert label/annotation metadata for workload/namespace alerts.
+- Alert receiver implementation for CI is now Go-native (`cmd/alert-receiver` + `internal/alertreceiver`) with image build via `Dockerfile.alert-receiver`; Python inline receiver manifests were removed.
+- Nightly alert-delivery check is now also Go-native (`ci-runner nightly-alert-delivery`), with `hack/ci/nightly_alert_delivery.sh` kept as a thin wrapper.
 
 ## Known Caveats
 - Historical samples are still in-memory only; data resets on operator restart.
@@ -58,3 +60,4 @@ Persistent notes for decisions, constraints, and operating context that should s
 - 2026-02-23: Added risk-change detection, workload correlation, and external notification routing via CapacityPlanNotification.
 - 2026-02-23: Added budget breach forecasting and anomaly detection surfaced in status, metrics, and generated alert rules.
 - 2026-02-24: Added Ollama LLM provider support and CI toggles for in-cluster model-backed insight checks (manual + nightly).
+- 2026-02-24: Migrated alert receiver from inline Python to a Go service and wired CI build/import/deploy through `ALERT_RECEIVER_IMAGE`.
