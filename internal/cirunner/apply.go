@@ -286,11 +286,11 @@ func ApplyCapacityPlan(ctx context.Context, c *Clients, cfg Config) error {
 					{Namespace: "default", Budget: "1600Mi"},
 				},
 				WorkloadBudgets: []capacityv1.WorkloadBudgetSpec{
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-steady", Budget: "500Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-bursty", Budget: "500Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-trickle", Budget: "500Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-churn", Budget: "500Mi"},
-					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-delayed", Budget: "500Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-steady", Budget: "160Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-bursty", Budget: "160Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-trickle", Budget: "160Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-churn", Budget: "160Mi"},
+					{Namespace: "default", Kind: "Pod", Name: "cpo-ci-delayed", Budget: "160Mi"},
 				},
 			},
 			LLM: capacityv1.LLMProviderSpec{
