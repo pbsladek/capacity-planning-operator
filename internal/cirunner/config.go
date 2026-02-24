@@ -37,6 +37,7 @@ type Config struct {
 	ValidationReportJSON            string
 	PollIntervalSeconds             int
 	PromEndpointReadyTimeout        int
+	MonitoringRolloutTimeout        int
 	AlertEndpointReadyTimeout       int
 	AlertPropagationTimeout         int
 	ManagerEndpointReadyTimeout     int
@@ -173,6 +174,7 @@ func LoadConfig() Config {
 		ValidationReportJSON:            getenvDefault("VALIDATION_REPORT_JSON", "/tmp/cpo-ci-validation-report.json"),
 		PollIntervalSeconds:             getenvInt("POLL_INTERVAL_SECONDS", 5),
 		PromEndpointReadyTimeout:        getenvInt("PROM_ENDPOINT_READY_TIMEOUT_SECONDS", 300),
+		MonitoringRolloutTimeout:        getenvInt("MONITORING_ROLLOUT_TIMEOUT_SECONDS", 600),
 		AlertEndpointReadyTimeout:       getenvInt("ALERT_ENDPOINT_READY_TIMEOUT_SECONDS", 300),
 		AlertPropagationTimeout:         getenvInt("ALERT_PROPAGATION_TIMEOUT_SECONDS", 900),
 		ManagerEndpointReadyTimeout:     getenvInt("MANAGER_ENDPOINT_READY_TIMEOUT_SECONDS", 180),

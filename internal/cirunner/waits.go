@@ -72,20 +72,92 @@ func waitForDeploymentRollout(ctx context.Context, c *Clients, namespace, name s
 }
 
 func waitForStatefulSetRollout(ctx context.Context, c *Clients, namespace, name string, timeout, interval time.Duration) error {
-	return waitUntil(ctx, timeout, interval, fmt.Sprintf("statefulset/%s rollout", name), func(ctx context.Context) (bool, error) {
+	var lastStatus string
+	err := waitUntil(ctx, timeout, interval, fmt.Sprintf("statefulset/%s rollout", name), func(ctx context.Context) (bool, error) {
 		sts, err := c.Clientset.AppsV1().StatefulSets(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
+			lastStatus = fmt.Sprintf("get failed: %v", err)
 			return false, nil
 		}
-		desired := int32(1)
-		if sts.Spec.Replicas != nil {
-			desired = *sts.Spec.Replicas
-		}
-		if sts.Status.ObservedGeneration < sts.Generation {
-			return false, nil
-		}
-		return sts.Status.ReadyReplicas >= desired && sts.Status.UpdatedReplicas >= desired, nil
+		ready, status := statefulSetRolloutReady(sts)
+		lastStatus = status
+		return ready, nil
 	})
+	if err != nil {
+		if strings.TrimSpace(lastStatus) != "" {
+			return fmt.Errorf("%w (last status: %s)", err, lastStatus)
+		}
+		return err
+	}
+	return nil
+}
+
+func statefulSetRolloutReady(sts *appsv1.StatefulSet) (bool, string) {
+	desired := int32(1)
+	if sts.Spec.Replicas != nil {
+		desired = *sts.Spec.Replicas
+	}
+	if desired <= 0 {
+		return false, "desired replicas <= 0"
+	}
+	if sts.Status.ObservedGeneration < sts.Generation {
+		return false, fmt.Sprintf(
+			"observedGeneration=%d generation=%d ready=%d updated=%d",
+			sts.Status.ObservedGeneration,
+			sts.Generation,
+			sts.Status.ReadyReplicas,
+			sts.Status.UpdatedReplicas,
+		)
+	}
+	if sts.Status.ReadyReplicas < desired {
+		return false, fmt.Sprintf(
+			"ready=%d/%d updated=%d currentReplicas=%d currentRevision=%s updateRevision=%s",
+			sts.Status.ReadyReplicas,
+			desired,
+			sts.Status.UpdatedReplicas,
+			sts.Status.CurrentReplicas,
+			sts.Status.CurrentRevision,
+			sts.Status.UpdateRevision,
+		)
+	}
+	if sts.Spec.UpdateStrategy.Type == appsv1.OnDeleteStatefulSetStrategyType {
+		return true, fmt.Sprintf(
+			"ready=%d/%d strategy=OnDelete currentRevision=%s updateRevision=%s",
+			sts.Status.ReadyReplicas,
+			desired,
+			sts.Status.CurrentRevision,
+			sts.Status.UpdateRevision,
+		)
+	}
+	if sts.Status.CurrentRevision != "" && sts.Status.UpdateRevision != "" && sts.Status.CurrentRevision != sts.Status.UpdateRevision {
+		return false, fmt.Sprintf(
+			"revision mismatch current=%s update=%s ready=%d/%d updated=%d",
+			sts.Status.CurrentRevision,
+			sts.Status.UpdateRevision,
+			sts.Status.ReadyReplicas,
+			desired,
+			sts.Status.UpdatedReplicas,
+		)
+	}
+	if sts.Status.UpdatedReplicas > 0 && sts.Status.UpdatedReplicas < desired {
+		return false, fmt.Sprintf(
+			"updated=%d/%d ready=%d currentRevision=%s updateRevision=%s",
+			sts.Status.UpdatedReplicas,
+			desired,
+			sts.Status.ReadyReplicas,
+			sts.Status.CurrentRevision,
+			sts.Status.UpdateRevision,
+		)
+	}
+	return true, fmt.Sprintf(
+		"ready=%d/%d updated=%d currentReplicas=%d currentRevision=%s updateRevision=%s",
+		sts.Status.ReadyReplicas,
+		desired,
+		sts.Status.UpdatedReplicas,
+		sts.Status.CurrentReplicas,
+		sts.Status.CurrentRevision,
+		sts.Status.UpdateRevision,
+	)
 }
 
 func waitForPodsScheduled(ctx context.Context, c *Clients, namespace string, podNames []string, timeout, interval time.Duration) error {

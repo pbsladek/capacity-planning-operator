@@ -1577,6 +1577,11 @@ func (r *IntegrationRunner) validateContext() error {
 }
 
 func (r *IntegrationRunner) setupMonitoring(ctx context.Context) error {
+	rolloutTimeout := time.Duration(r.cfg.MonitoringRolloutTimeout) * time.Second
+	if rolloutTimeout <= 0 {
+		rolloutTimeout = 10 * time.Minute
+	}
+
 	logStep("Installing kube-prometheus-stack")
 	if err := r.installKubePrometheusStack(ctx); err != nil {
 		return err
@@ -1597,13 +1602,13 @@ func (r *IntegrationRunner) setupMonitoring(ctx context.Context) error {
 	}, 5*time.Minute, r.cfg.PollInterval()); err != nil {
 		return err
 	}
-	if err := waitForDeploymentRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "kube-prometheus-stack-operator", 10*time.Minute, r.cfg.PollInterval()); err != nil {
+	if err := waitForDeploymentRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "kube-prometheus-stack-operator", rolloutTimeout, r.cfg.PollInterval()); err != nil {
 		return err
 	}
-	if err := waitForStatefulSetRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "prometheus-kube-prometheus-stack-prometheus", 10*time.Minute, r.cfg.PollInterval()); err != nil {
+	if err := waitForStatefulSetRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "prometheus-kube-prometheus-stack-prometheus", rolloutTimeout, r.cfg.PollInterval()); err != nil {
 		return err
 	}
-	if err := waitForStatefulSetRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "alertmanager-kube-prometheus-stack-alertmanager", 10*time.Minute, r.cfg.PollInterval()); err != nil {
+	if err := waitForStatefulSetRollout(ctx, r.clients, r.cfg.MonitoringNamespace, "alertmanager-kube-prometheus-stack-alertmanager", rolloutTimeout, r.cfg.PollInterval()); err != nil {
 		return err
 	}
 

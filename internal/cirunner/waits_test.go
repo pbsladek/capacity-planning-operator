@@ -44,3 +44,40 @@ func TestDeploymentRolloutStatus(t *testing.T) {
 		t.Fatalf("desired=%d", desired)
 	}
 }
+
+func TestStatefulSetRolloutReady(t *testing.T) {
+	replicas := int32(1)
+	sts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+		Spec: appsv1.StatefulSetSpec{
+			Replicas: &replicas,
+		},
+		Status: appsv1.StatefulSetStatus{
+			ObservedGeneration: 3,
+			ReadyReplicas:      1,
+			UpdatedReplicas:    0,
+			CurrentReplicas:    1,
+			CurrentRevision:    "rev-a",
+			UpdateRevision:     "rev-a",
+		},
+	}
+	ready, _ := statefulSetRolloutReady(sts)
+	if !ready {
+		t.Fatalf("expected ready when ReadyReplicas met and revisions match")
+	}
+
+	sts.Status.CurrentRevision = "rev-old"
+	sts.Status.UpdateRevision = "rev-new"
+	ready, _ = statefulSetRolloutReady(sts)
+	if ready {
+		t.Fatalf("expected not ready when revisions mismatch")
+	}
+
+	sts.Status.CurrentRevision = "rev-new"
+	sts.Status.UpdateRevision = "rev-new"
+	sts.Status.ReadyReplicas = 0
+	ready, _ = statefulSetRolloutReady(sts)
+	if ready {
+		t.Fatalf("expected not ready when ReadyReplicas < desired")
+	}
+}
