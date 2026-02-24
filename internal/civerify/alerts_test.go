@@ -58,7 +58,7 @@ func TestAlertmanagerHasCapacityAlerts(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
 {"labels":{"alertname":"Watchdog"}},
-{"labels":{"alertname":"PVCUsageHigh"}}
+{"labels":{"alertname":"PVCUsageHigh","namespace":"default","pvc":"example-pvc","severity":"warning"},"annotations":{"summary":"PVC usage high on default/example-pvc"},"status":{"state":"active"}}
 ]`))
 	}))
 	t.Cleanup(srv.Close)
@@ -72,6 +72,20 @@ func TestAlertmanagerHasCapacityAlerts(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("expected capacity alert to be present")
+	}
+
+	details, err := verifier.AlertmanagerCapacityAlertDetails(context.Background())
+	if err != nil {
+		t.Fatalf("AlertmanagerCapacityAlertDetails error: %v", err)
+	}
+	if len(details) != 1 {
+		t.Fatalf("expected 1 capacity alert detail, got %d", len(details))
+	}
+	if details[0].AlertName != "PVCUsageHigh" {
+		t.Fatalf("unexpected alert name: %s", details[0].AlertName)
+	}
+	if details[0].PVC != "example-pvc" {
+		t.Fatalf("unexpected pvc label: %s", details[0].PVC)
 	}
 }
 

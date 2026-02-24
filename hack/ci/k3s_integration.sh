@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-go run ./cmd/ci-runner integration "$@"
+bash hack/ci/run_ci_runner.sh integration "$@"

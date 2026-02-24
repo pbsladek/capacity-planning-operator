@@ -38,7 +38,18 @@ func TestPrintValidationReport(t *testing.T) {
 
 func TestWriteValidationReportJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "report.json")
-	err := WriteValidationReportJSON(path, ValidationReport{Context: "pass"})
+	err := WriteValidationReportJSON(path, ValidationReport{
+		Context: "pass",
+		PVCTrendDetails: []PVCTrendDetail{
+			{Name: "pvc-a", UsedMiB: 42.5},
+		},
+		WorkloadBudgetDetails: []WorkloadBudgetDetail{
+			{Target: "default/Pod/workload-a", BudgetMiB: 160},
+		},
+		AlertmanagerNotifications: []AlertNotificationDetail{
+			{AlertName: "PVCUsageHigh", Target: "default/pvc/pvc-a"},
+		},
+	})
 	if err != nil {
 		t.Fatalf("WriteValidationReportJSON: %v", err)
 	}
@@ -51,5 +62,14 @@ func TestWriteValidationReportJSON(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"generatedAtUTC"`) {
 		t.Fatalf("missing generatedAtUTC: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"pvcTrendDetails"`) {
+		t.Fatalf("missing pvcTrendDetails: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"workloadBudgetDetails"`) {
+		t.Fatalf("missing workloadBudgetDetails: %s", string(raw))
+	}
+	if !strings.Contains(string(raw), `"alertmanagerNotifications"`) {
+		t.Fatalf("missing alertmanagerNotifications: %s", string(raw))
 	}
 }

@@ -18,6 +18,7 @@ jobs:
     env:
       CLUSTER_NAME: cpo-ci
       OPERATOR_IMAGE: capacity-planning-operator:ci
+      CI_RUNNER_BIN: /tmp/cpo-ci-runner
       EXTRA_IMAGES: busybox:1.36
       K3D_VERSION: v5.7.5
       K3S_IMAGE: rancher/k3s:v1.32.2-k3s1
@@ -36,8 +37,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
 
+      - name: Setup Go
+        uses: actions/setup-go@93397bea11091df50f3d7e59dc26a7711a8bcfbe
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Verify Go toolchain
         run: go version
+
+      - name: Build CI runner binary
+        run: |
+          go build -o "${CI_RUNNER_BIN}" ./cmd/ci-runner
+          chmod +x "${CI_RUNNER_BIN}"
 
       - name: Install kubectl (pinned)
         run: |

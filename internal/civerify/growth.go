@@ -32,7 +32,10 @@ type ComparisonRow struct {
 	HasPromData       bool
 	AbsDiff           float64
 	RelDiffPct        float64
+	AllowedDiff       float64
+	ToleranceBasis    string
 	Matched           bool
+	Reason            string
 }
 
 // ComparisonSummary captures the aggregate cross-check result.
@@ -59,6 +62,7 @@ func CompareGrowth(ctx context.Context, status []PVCGrowth, fetch GrowthFetcher,
 			return summary, fmt.Errorf("querying Prometheus growth for %s: %w", pvc.Name, err)
 		}
 		if !hasData || math.IsNaN(promGrowth) || math.IsInf(promGrowth, 0) {
+			row.Reason = "no_prometheus_data"
 			summary.Rows = append(summary.Rows, row)
 			continue
 		}
@@ -67,9 +71,22 @@ func CompareGrowth(ctx context.Context, status []PVCGrowth, fetch GrowthFetcher,
 		row.PromBytesPerDay = promGrowth
 		row.AbsDiff = math.Abs(pvc.StatusBytesPerDay - promGrowth)
 		scale := math.Max(1, math.Max(math.Abs(pvc.StatusBytesPerDay), math.Abs(promGrowth)))
-		allowed := math.Max(opts.AbsToleranceBytesDay, opts.RelativeTolerance*scale)
+		allowedAbs := opts.AbsToleranceBytesDay
+		allowedRel := opts.RelativeTolerance * scale
+		allowed := math.Max(allowedAbs, allowedRel)
 		row.RelDiffPct = (row.AbsDiff / scale) * 100
+		row.AllowedDiff = allowed
+		if allowedAbs >= allowedRel {
+			row.ToleranceBasis = "absolute"
+		} else {
+			row.ToleranceBasis = "relative"
+		}
 		row.Matched = row.AbsDiff <= allowed
+		if row.Matched {
+			row.Reason = "within_tolerance"
+		} else {
+			row.Reason = "exceeds_" + row.ToleranceBasis + "_tolerance"
+		}
 
 		summary.Comparable++
 		if row.Matched {

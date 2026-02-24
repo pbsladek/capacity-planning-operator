@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-go run ./cmd/ci-runner collect-diagnostics "$@"
+bash hack/ci/run_ci_runner.sh collect-diagnostics "$@"

@@ -37,6 +37,17 @@ func TestCompareGrowthAllMatched(t *testing.T) {
 	if summary.Matched != 2 {
 		t.Fatalf("expected 2 matched PVCs, got %d", summary.Matched)
 	}
+	for _, row := range summary.Rows {
+		if !row.Matched {
+			t.Fatalf("expected row %s to match", row.Name)
+		}
+		if row.Reason != "within_tolerance" {
+			t.Fatalf("expected within_tolerance reason for %s, got %q", row.Name, row.Reason)
+		}
+		if row.ToleranceBasis == "" {
+			t.Fatalf("expected tolerance basis for %s", row.Name)
+		}
+	}
 }
 
 func TestCompareGrowthInsufficientComparable(t *testing.T) {
@@ -103,6 +114,21 @@ func TestCompareGrowthInsufficientMatches(t *testing.T) {
 	}
 	if summary.Matched != 1 {
 		t.Fatalf("expected matched=1, got %d", summary.Matched)
+	}
+	var badRow ComparisonRow
+	found := false
+	for _, row := range summary.Rows {
+		if row.Name == "b" {
+			badRow = row
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected row for pvc b")
+	}
+	if badRow.Reason == "" || badRow.Reason == "within_tolerance" {
+		t.Fatalf("expected non-matching reason for pvc b, got %q", badRow.Reason)
 	}
 }
 

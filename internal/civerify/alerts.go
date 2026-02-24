@@ -103,7 +103,48 @@ func (v *AlertVerifier) PrometheusHasAllWorkloadBudgetAlerts(ctx context.Context
 }
 
 type alertmanagerAlert struct {
-	Labels map[string]string `json:"labels"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	Status      struct {
+		State string `json:"state"`
+	} `json:"status"`
+	StartsAt  string `json:"startsAt"`
+	UpdatedAt string `json:"updatedAt"`
+}
+
+// AlertDetail is a compact view of an alert instance for reporting.
+type AlertDetail struct {
+	AlertName   string
+	State       string
+	Severity    string
+	Namespace   string
+	PVC         string
+	Kind        string
+	Workload    string
+	Summary     string
+	Description string
+	StartsAt    string
+	UpdatedAt   string
+}
+
+func isCapacityAlertName(name string) bool {
+	return slices.Contains(capacityAlertNames, name)
+}
+
+func toAlertDetail(a alertmanagerAlert) AlertDetail {
+	return AlertDetail{
+		AlertName:   strings.TrimSpace(a.Labels["alertname"]),
+		State:       strings.TrimSpace(a.Status.State),
+		Severity:    strings.TrimSpace(a.Labels["severity"]),
+		Namespace:   strings.TrimSpace(a.Labels["namespace"]),
+		PVC:         strings.TrimSpace(a.Labels["pvc"]),
+		Kind:        strings.TrimSpace(a.Labels["kind"]),
+		Workload:    strings.TrimSpace(a.Labels["workload"]),
+		Summary:     strings.TrimSpace(a.Annotations["summary"]),
+		Description: strings.TrimSpace(a.Annotations["description"]),
+		StartsAt:    strings.TrimSpace(a.StartsAt),
+		UpdatedAt:   strings.TrimSpace(a.UpdatedAt),
+	}
 }
 
 // AlertmanagerHasCapacityAlerts checks if Alertmanager currently has at least one capacity alert.
@@ -132,9 +173,43 @@ func (v *AlertVerifier) AlertmanagerHasCapacityAlerts(ctx context.Context) (bool
 	}
 	for _, alert := range alerts {
 		name := alert.Labels["alertname"]
-		if slices.Contains(capacityAlertNames, name) {
+		if isCapacityAlertName(name) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// AlertmanagerCapacityAlertDetails returns active capacity alert details from Alertmanager.
+func (v *AlertVerifier) AlertmanagerCapacityAlertDetails(ctx context.Context) ([]AlertDetail, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.alertmanagerURL+"/api/v2/alerts", nil)
+	if err != nil {
+		return nil, fmt.Errorf("building alertmanager request: %w", err)
+	}
+	resp, err := v.alertmanagerClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling alertmanager API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading alertmanager response: %w", err)
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("alertmanager HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var alerts []alertmanagerAlert
+	if err := json.Unmarshal(body, &alerts); err != nil {
+		return nil, fmt.Errorf("decoding alertmanager response: %w", err)
+	}
+	out := make([]AlertDetail, 0, len(alerts))
+	for _, alert := range alerts {
+		if !isCapacityAlertName(alert.Labels["alertname"]) {
+			continue
+		}
+		out = append(out, toAlertDetail(alert))
+	}
+	return out, nil
 }

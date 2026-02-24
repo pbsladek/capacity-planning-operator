@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	capacityv1 "github.com/pbsladek/capacity-planning-operator/api/v1"
@@ -126,9 +127,225 @@ func (r *IntegrationRunner) renderValidationReport() {
 	if r.state.sawCapacityToRequestMismatch {
 		fmt.Println("Note: Prometheus kubelet volume stats capacity appears to reflect backing filesystem size (not PVC request) for at least one PVC.")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	report.PVCTrendDetails, report.WorkloadBudgetDetails = r.printCapacityPlanInsights(ctx)
+	report.AlertmanagerNotifications = r.printAlertmanagerInsights(ctx)
 	if err := civerify.WriteValidationReportJSON(r.cfg.ValidationReportJSON, report); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write validation report: %v\n", err)
 	}
+}
+
+func trimText(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || max <= 0 || len(value) <= max {
+		return value
+	}
+	if max <= 3 {
+		return value[:max]
+	}
+	return value[:max-3] + "..."
+}
+
+func daysString(days *float64) string {
+	if days == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2f", *days)
+}
+
+func copyFloat64Ptr(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
+func forecastTarget(f capacityv1.StorageBudgetForecast) string {
+	if strings.EqualFold(f.Scope, "workload") {
+		return fmt.Sprintf("%s/%s/%s", f.Namespace, f.Kind, f.Name)
+	}
+	return f.Namespace
+}
+
+func alertTarget(d civerify.AlertDetail) string {
+	if d.Namespace != "" && d.PVC != "" {
+		return fmt.Sprintf("%s/pvc/%s", d.Namespace, d.PVC)
+	}
+	if d.Namespace != "" && d.Workload != "" && d.Kind != "" {
+		return fmt.Sprintf("%s/%s/%s", d.Namespace, d.Kind, d.Workload)
+	}
+	if d.Namespace != "" {
+		return d.Namespace
+	}
+	return "cluster"
+}
+
+func alertReasonHint(alertName string) string {
+	switch alertName {
+	case "PVCUsageHigh":
+		return "usage ratio above warning threshold"
+	case "PVCUsageCritical":
+		return "usage ratio above critical threshold"
+	case "NamespaceBudgetBreachSoon":
+		return "namespace budget forecast under 7d"
+	case "WorkloadBudgetBreachSoon":
+		return "workload budget forecast under 7d"
+	default:
+		return "capacity rule matched"
+	}
+}
+
+func (r *IntegrationRunner) printCapacityPlanInsights(ctx context.Context) ([]civerify.PVCTrendDetail, []civerify.WorkloadBudgetDetail) {
+	cp, err := getCapacityPlan(ctx, r.clients, r.cfg.PlanName)
+	if err != nil {
+		fmt.Printf("Detailed insights: unable to fetch CapacityPlan %q: %v\n", r.cfg.PlanName, err)
+		return nil, nil
+	}
+
+	pvcDetails := make([]civerify.PVCTrendDetail, 0, len(cp.Status.PVCs))
+	if len(cp.Status.PVCs) > 0 {
+		fmt.Println("Latest PVC trend summary")
+		rows := append([]capacityv1.PVCSummary(nil), cp.Status.PVCs...)
+		sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "  pvc\tusedMiB\tusageRatio\tgrowthMiBPerMin\tsamples\talertFiring\tdaysUntilFull")
+		for _, pvc := range rows {
+			fmt.Fprintf(
+				tw,
+				"  %s\t%.2f\t%.3f\t%.2f\t%d\t%t\t%s\n",
+				pvc.Name,
+				float64(pvc.UsedBytes)/(1024.0*1024.0),
+				pvc.UsageRatio,
+				(pvc.GrowthBytesPerDay/1440.0)/(1024.0*1024.0),
+				pvc.SamplesCount,
+				pvc.AlertFiring,
+				daysString(pvc.DaysUntilFull),
+			)
+			pvcDetails = append(pvcDetails, civerify.PVCTrendDetail{
+				Namespace:         pvc.Namespace,
+				Name:              pvc.Name,
+				UsedBytes:         pvc.UsedBytes,
+				UsedMiB:           float64(pvc.UsedBytes) / (1024.0 * 1024.0),
+				UsageRatio:        pvc.UsageRatio,
+				GrowthBytesPerDay: pvc.GrowthBytesPerDay,
+				GrowthMiBPerMin:   (pvc.GrowthBytesPerDay / 1440.0) / (1024.0 * 1024.0),
+				SamplesCount:      pvc.SamplesCount,
+				AlertFiring:       pvc.AlertFiring,
+				DaysUntilFull:     copyFloat64Ptr(pvc.DaysUntilFull),
+			})
+		}
+		_ = tw.Flush()
+	}
+
+	workloadDetails := make([]civerify.WorkloadBudgetDetail, 0, len(cp.Status.WorkloadForecasts))
+	if len(cp.Status.WorkloadForecasts) > 0 {
+		fmt.Println("Latest workload budget forecast")
+		rows := append([]capacityv1.StorageBudgetForecast(nil), cp.Status.WorkloadForecasts...)
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].Namespace != rows[j].Namespace {
+				return rows[i].Namespace < rows[j].Namespace
+			}
+			if rows[i].Kind != rows[j].Kind {
+				return rows[i].Kind < rows[j].Kind
+			}
+			return rows[i].Name < rows[j].Name
+		})
+		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "  workload\tbudgetMiB\tusedMiB\tusageRatio\tgrowthMiBPerMin\tdaysUntilBreach\tprojectedBreachAt")
+		for _, f := range rows {
+			projected := "n/a"
+			if f.ProjectedBreachAt != nil {
+				projected = f.ProjectedBreachAt.Time.UTC().Format(time.RFC3339)
+			}
+			fmt.Fprintf(
+				tw,
+				"  %s\t%.2f\t%.2f\t%.3f\t%.2f\t%s\t%s\n",
+				forecastTarget(f),
+				float64(f.BudgetBytes)/(1024.0*1024.0),
+				float64(f.UsedBytes)/(1024.0*1024.0),
+				f.UsageRatio,
+				(f.GrowthBytesPerDay/1440.0)/(1024.0*1024.0),
+				daysString(f.DaysUntilBreach),
+				projected,
+			)
+			workloadDetails = append(workloadDetails, civerify.WorkloadBudgetDetail{
+				Namespace:         f.Namespace,
+				Kind:              f.Kind,
+				Name:              f.Name,
+				Target:            forecastTarget(f),
+				BudgetBytes:       f.BudgetBytes,
+				BudgetMiB:         float64(f.BudgetBytes) / (1024.0 * 1024.0),
+				UsedBytes:         f.UsedBytes,
+				UsedMiB:           float64(f.UsedBytes) / (1024.0 * 1024.0),
+				UsageRatio:        f.UsageRatio,
+				GrowthBytesPerDay: f.GrowthBytesPerDay,
+				GrowthMiBPerMin:   (f.GrowthBytesPerDay / 1440.0) / (1024.0 * 1024.0),
+				DaysUntilBreach:   copyFloat64Ptr(f.DaysUntilBreach),
+				ProjectedBreachAt: projected,
+			})
+		}
+		_ = tw.Flush()
+	}
+	return pvcDetails, workloadDetails
+}
+
+func (r *IntegrationRunner) printAlertmanagerInsights(ctx context.Context) []civerify.AlertNotificationDetail {
+	if r.alertVerifier == nil {
+		fmt.Println("Alertmanager notification summary: unavailable (alert verifier not initialized)")
+		return nil
+	}
+	details, err := r.alertVerifier.AlertmanagerCapacityAlertDetails(ctx)
+	if err != nil {
+		fmt.Printf("Alertmanager notification summary: unable to fetch alerts: %v\n", err)
+		return nil
+	}
+	if len(details) == 0 {
+		fmt.Println("Alertmanager notification summary: no active capacity alerts at report time")
+		return nil
+	}
+	sort.Slice(details, func(i, j int) bool {
+		if details[i].AlertName != details[j].AlertName {
+			return details[i].AlertName < details[j].AlertName
+		}
+		return alertTarget(details[i]) < alertTarget(details[j])
+	})
+	fmt.Println("Alertmanager capacity notifications")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  alert\tstate\tseverity\ttarget\twhy\tsummary")
+	reportRows := make([]civerify.AlertNotificationDetail, 0, len(details))
+	for _, d := range details {
+		target := alertTarget(d)
+		why := alertReasonHint(d.AlertName)
+		fmt.Fprintf(
+			tw,
+			"  %s\t%s\t%s\t%s\t%s\t%s\n",
+			d.AlertName,
+			d.State,
+			d.Severity,
+			target,
+			why,
+			trimText(d.Summary, 110),
+		)
+		reportRows = append(reportRows, civerify.AlertNotificationDetail{
+			AlertName:   d.AlertName,
+			State:       d.State,
+			Severity:    d.Severity,
+			Namespace:   d.Namespace,
+			PVC:         d.PVC,
+			Kind:        d.Kind,
+			Workload:    d.Workload,
+			Target:      target,
+			Why:         why,
+			Summary:     d.Summary,
+			Description: d.Description,
+			StartsAt:    d.StartsAt,
+			UpdatedAt:   d.UpdatedAt,
+		})
+	}
+	_ = tw.Flush()
+	return reportRows
 }
 
 func runCommand(ctx context.Context, name string, args ...string) error {
@@ -416,11 +633,27 @@ func (r *IntegrationRunner) printCapacitySnapshot(cp *capacityv1.CapacityPlan) {
 		fmt.Println("  status.pvcs is empty")
 		return
 	}
-	fmt.Println("  pvc usedBytes samples usageRatio growthBytesPerDay growthBytesPerMin")
-	for _, pvc := range cp.Status.PVCs {
+	rows := append([]capacityv1.PVCSummary(nil), cp.Status.PVCs...)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Name < rows[j].Name
+	})
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  pvc\tusedBytes\tusedMiB\tsamples\tusageRatio\tgrowthBytesPerDay\tgrowthMiBPerMin")
+	for _, pvc := range rows {
 		gpm := pvc.GrowthBytesPerDay / 1440.0
-		fmt.Printf("  %s %d %d %.12g %.12g %.2f\n", pvc.Name, pvc.UsedBytes, pvc.SamplesCount, pvc.UsageRatio, pvc.GrowthBytesPerDay, gpm)
+		fmt.Fprintf(
+			tw,
+			"  %s\t%d\t%.2f\t%d\t%.6f\t%.6g\t%.2f\n",
+			pvc.Name,
+			pvc.UsedBytes,
+			float64(pvc.UsedBytes)/(1024.0*1024.0),
+			pvc.SamplesCount,
+			pvc.UsageRatio,
+			pvc.GrowthBytesPerDay,
+			gpm/(1024.0*1024.0),
+		)
 	}
+	_ = tw.Flush()
 }
 
 func (r *IntegrationRunner) printGrowthSummary(cp *capacityv1.CapacityPlan) {
@@ -430,10 +663,17 @@ func (r *IntegrationRunner) printGrowthSummary(cp *capacityv1.CapacityPlan) {
 		fmt.Println("  status.pvcs is empty")
 		return
 	}
-	fmt.Println("  pvc growthBytesPerMin")
-	for _, pvc := range cp.Status.PVCs {
-		fmt.Printf("  %s %.2f\n", pvc.Name, pvc.GrowthBytesPerDay/1440.0)
+	rows := append([]capacityv1.PVCSummary(nil), cp.Status.PVCs...)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Name < rows[j].Name
+	})
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  pvc\tgrowthBytesPerMin\tgrowthMiBPerMin")
+	for _, pvc := range rows {
+		gpm := pvc.GrowthBytesPerDay / 1440.0
+		fmt.Fprintf(tw, "  %s\t%.2f\t%.2f\n", pvc.Name, gpm, gpm/(1024.0*1024.0))
 	}
+	_ = tw.Flush()
 }
 
 func (r *IntegrationRunner) prometheusScalar(ctx context.Context, query string) (float64, bool) {
@@ -476,7 +716,8 @@ func (r *IntegrationRunner) pvcRequestedBytes(ctx context.Context, pvcName strin
 func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, pvcs []string) int {
 	now := time.Now().UTC().Format(time.RFC3339)
 	fmt.Printf("[%s] Prometheus PVC raw snapshot (default namespace)\n", now)
-	fmt.Println("  pvc usedBytes capBytes reqBytes ratio usedSeriesCount capToReq")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  pvc\tusedBytes\tusedMiB\tcapBytes\tcapMiB\treqBytes\tratio\tusedSeriesCount\tcapToReq")
 	mismatchCount := 0
 	for _, pvc := range pvcs {
 		used, usedOK := r.prometheusScalar(ctx, promUsedBytesQuery("default", pvc))
@@ -511,8 +752,17 @@ func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, p
 		if reqOK {
 			reqStr = fmt.Sprintf("%d", req)
 		}
-		fmt.Printf("  %s %s %s %s %s %s %s\n", pvc, usedStr, capStr, reqStr, ratioStr, seriesStr, capToReq)
+		usedMiB := "n/a"
+		if usedOK {
+			usedMiB = fmt.Sprintf("%.2f", used/(1024.0*1024.0))
+		}
+		capMiB := "n/a"
+		if capOK {
+			capMiB = fmt.Sprintf("%.2f", cap/(1024.0*1024.0))
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", pvc, usedStr, usedMiB, capStr, capMiB, reqStr, ratioStr, seriesStr, capToReq)
 	}
+	_ = tw.Flush()
 	if mismatchCount > 0 {
 		fmt.Printf("  note: %d PVC(s) have capBytes much larger than requested storage; kubelet stats likely reflect backing filesystem capacity\n", mismatchCount)
 	}
@@ -593,12 +843,16 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 	if compareErr != nil {
 		return compareErr
 	}
-	r.printGrowthInterpretation(cpGrowth, summary)
+	r.printGrowthInterpretation(cpGrowth, summary, opts)
 	r.state.checkGrowthCompare = fmt.Sprintf("pass (%d/%d matched)", summary.Matched, summary.Comparable)
 	return nil
 }
 
-func (r *IntegrationRunner) printGrowthInterpretation(cpGrowth []civerify.PVCGrowth, summary civerify.ComparisonSummary) {
+func (r *IntegrationRunner) printGrowthInterpretation(
+	cpGrowth []civerify.PVCGrowth,
+	summary civerify.ComparisonSummary,
+	opts civerify.CompareOptions,
+) {
 	if len(cpGrowth) == 0 {
 		return
 	}
@@ -627,9 +881,75 @@ func (r *IntegrationRunner) printGrowthInterpretation(cpGrowth []civerify.PVCGro
 			maxRelName = row.Name
 		}
 	}
+	noData := len(summary.Rows) - summary.Comparable
+	rows := append([]civerify.ComparisonRow(nil), summary.Rows...)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].Name < rows[j].Name
+	})
 	fmt.Println("Growth interpretation")
+	fmt.Printf(
+		"  tolerances: relative=%.2f%% absolute=%.0f B/day (effective threshold per PVC: max(relative*scale, absolute))\n",
+		opts.RelativeTolerance*100.0,
+		opts.AbsToleranceBytesDay,
+	)
 	fmt.Printf("  status growth range: %.2f to %.2f MiB/min (avg %.2f MiB/min)\n", minPerMin/(1024*1024), maxPerMin/(1024*1024), avgPerMin/(1024*1024))
-	fmt.Printf("  cross-check match: %d/%d PVCs within tolerances\n", summary.Matched, summary.Comparable)
+	fmt.Printf(
+		"  cross-check match: %d/%d comparable PVCs within tolerances (no-prom-data=%d, required comparable=%d, required matches=%d)\n",
+		summary.Matched,
+		summary.Comparable,
+		noData,
+		opts.MinComparablePVCs,
+		opts.MinMatchingPVCs,
+	)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "  pvc\tstatusMiBPerMin\tpromMiBPerMin\trelDiffPct\tallowedDiffBytesPerDay\tmatch\treason")
+	for _, row := range rows {
+		prom := "n/a"
+		if row.HasPromData {
+			prom = fmt.Sprintf("%.2f", row.PromBytesPerDay/(1024.0*1024.0*1440.0))
+		}
+		allowed := "n/a"
+		if row.HasPromData {
+			allowed = fmt.Sprintf("%.12g", row.AllowedDiff)
+		}
+		rel := "n/a"
+		if row.HasPromData {
+			rel = fmt.Sprintf("%.2f", row.RelDiffPct)
+		}
+		match := "no"
+		if row.Matched {
+			match = "yes"
+		}
+		fmt.Fprintf(
+			tw,
+			"  %s\t%.2f\t%s\t%s\t%s\t%s\t%s\n",
+			row.Name,
+			row.StatusBytesPerDay/(1024.0*1024.0*1440.0),
+			prom,
+			rel,
+			allowed,
+			match,
+			row.Reason,
+		)
+	}
+	_ = tw.Flush()
+	if summary.Matched < summary.Comparable {
+		fmt.Println("  mismatches:")
+		for _, row := range rows {
+			if !row.HasPromData || row.Matched {
+				continue
+			}
+			fmt.Printf(
+				"    %s: absDiff=%.12g B/day relDiff=%.2f%% allowed=%.12g B/day basis=%s reason=%s\n",
+				row.Name,
+				row.AbsDiff,
+				row.RelDiffPct,
+				row.AllowedDiff,
+				row.ToleranceBasis,
+				row.Reason,
+			)
+		}
+	}
 	if maxRelName != "" {
 		fmt.Printf("  largest status-vs-prometheus delta: %s (%.2f%%)\n", maxRelName, maxRelDiff)
 	}
