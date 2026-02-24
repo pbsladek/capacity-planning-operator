@@ -1773,6 +1773,86 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 	if _, err := httpPostJSON(pullCtx, "http://127.0.0.1:21134/api/pull", payload, pullTimeout); err != nil {
 		return fmt.Errorf("pulling ollama model %q: %w", r.cfg.LLMModel, err)
 	}
+
+	if err := waitUntil(ctx, 2*time.Minute, r.cfg.PollInterval(), fmt.Sprintf("Ollama model %q in /api/tags", r.cfg.LLMModel), func(ctx context.Context) (bool, error) {
+		body, err := httpBody(ctx, "http://127.0.0.1:21134/api/tags", 10*time.Second)
+		if err != nil {
+			return false, nil
+		}
+		return ollamaTagsContainModel(body, r.cfg.LLMModel), nil
+	}); err != nil {
+		return err
+	}
+
+	logStep("Running Ollama generation smoke test")
+	generateTimeout := time.Duration(r.cfg.LLMTimeoutSeconds) * time.Second
+	if generateTimeout <= 0 {
+		generateTimeout = 90 * time.Second
+	}
+	if generateTimeout < 30*time.Second {
+		generateTimeout = 30 * time.Second
+	}
+	generateCtx, generateCancel := context.WithTimeout(ctx, generateTimeout+30*time.Second)
+	defer generateCancel()
+	generatePayload := map[string]interface{}{
+		"model":  r.cfg.LLMModel,
+		"prompt": "Reply with the single word OK.",
+		"stream": false,
+		"options": map[string]interface{}{
+			"num_predict":    16,
+			"temperature":    0,
+			"top_k":          1,
+			"repeat_penalty": 1,
+		},
+	}
+	generateBody, err := httpPostJSON(generateCtx, "http://127.0.0.1:21134/api/generate", generatePayload, generateTimeout+30*time.Second)
+	if err != nil {
+		return fmt.Errorf("ollama generation smoke test failed for model %q: %w", r.cfg.LLMModel, err)
+	}
+	if err := validateOllamaGenerateResponse(generateBody); err != nil {
+		return fmt.Errorf("ollama generation smoke test returned invalid payload: %w", err)
+	}
+	return nil
+}
+
+func ollamaTagsContainModel(tagsBody, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+
+	var payload struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(tagsBody), &payload); err == nil {
+		for _, item := range payload.Models {
+			name := strings.TrimSpace(item.Name)
+			if name == model || strings.HasPrefix(name, model+":") {
+				return true
+			}
+		}
+	}
+	return strings.Contains(tagsBody, model)
+}
+
+func validateOllamaGenerateResponse(body string) error {
+	var payload struct {
+		Model    string `json:"model"`
+		Response string `json:"response"`
+		Done     bool   `json:"done"`
+		Error    string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return fmt.Errorf("decoding generate response: %w", err)
+	}
+	if strings.TrimSpace(payload.Error) != "" {
+		return fmt.Errorf("generate response error: %s", strings.TrimSpace(payload.Error))
+	}
+	if strings.TrimSpace(payload.Response) == "" {
+		return fmt.Errorf("generate response was empty")
+	}
 	return nil
 }
 
@@ -1815,8 +1895,23 @@ func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.
 		return nil, err
 	}
 
-	logStep("Waiting for CapacityPlan reconciliation")
-	firstReconcile, err := waitForCapacityPlanReconcile(ctx, r.clients, r.cfg.PlanName, 5*time.Minute, r.cfg.PollInterval())
+	reconcileWaitTimeout := 5 * time.Minute
+	if r.llmEnabled() {
+		perPVC := time.Duration(r.cfg.LLMTimeoutSeconds) * time.Second
+		if perPVC <= 0 {
+			perPVC = 90 * time.Second
+		}
+		estimated := (time.Duration(len(r.cfg.CIWorkloads)) * perPVC) + (2 * time.Minute)
+		if estimated > reconcileWaitTimeout {
+			reconcileWaitTimeout = estimated
+		}
+		if reconcileWaitTimeout > 20*time.Minute {
+			reconcileWaitTimeout = 20 * time.Minute
+		}
+	}
+
+	logStep(fmt.Sprintf("Waiting for CapacityPlan reconciliation (timeout %s)", reconcileWaitTimeout))
+	firstReconcile, err := waitForCapacityPlanReconcile(ctx, r.clients, r.cfg.PlanName, reconcileWaitTimeout, r.cfg.PollInterval())
 	if err != nil {
 		return nil, err
 	}

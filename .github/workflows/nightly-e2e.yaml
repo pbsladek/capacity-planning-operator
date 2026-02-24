@@ -145,7 +145,19 @@ jobs:
 
       - name: Collect Diagnostics on Failure
         if: failure()
+        continue-on-error: true
         run: bash hack/ci/collect_diagnostics.sh
+
+      - name: List Diagnostic Files on Failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          echo "Diagnostics tree under /tmp/cpo-ci-diagnostics"
+          if [ -d /tmp/cpo-ci-diagnostics ]; then
+            find /tmp/cpo-ci-diagnostics -maxdepth 4 -type f | sort
+          else
+            echo "diagnostics directory not found"
+          fi
 
       - name: Upload Diagnostics Artifact
         if: failure()
@@ -153,5 +165,16 @@ jobs:
         with:
           name: nightly-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/cpo-ci-diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Combined Debug Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-e2e-debug-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/cpo-ci-validation-report.json
+            /tmp/cpo-ci-diagnostics
           if-no-files-found: warn
           retention-days: 14

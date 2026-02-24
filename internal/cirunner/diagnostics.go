@@ -30,6 +30,14 @@ type DiagnosticsRunner struct {
 	alertPF *PortForwardSession
 }
 
+func llmConfigured(cfg Config) bool {
+	if !cfg.LLMEnabled {
+		return false
+	}
+	provider := strings.TrimSpace(cfg.LLMProvider)
+	return provider != "" && provider != "disabled"
+}
+
 func NewDiagnosticsRunner(cfg Config) (*DiagnosticsRunner, error) {
 	clients, err := BuildClients()
 	if err != nil {
@@ -218,6 +226,107 @@ func (r *DiagnosticsRunner) captureAlertmanagerAPI(ctx context.Context, outDir s
 	_ = writeFile(filepath.Join(outDir, "logs", "alertmanager-port-forward.log"), pf.Logs())
 }
 
+func (r *DiagnosticsRunner) captureLLM(ctx context.Context, outDir string) {
+	r.writeCapture(filepath.Join(outDir, "llm", "config.txt"), func() (string, error) {
+		return fmt.Sprintf(
+			"enabled=%t\nprovider=%s\nmodel=%s\nnamespace=%s\ndeployment=%s\nserviceURL=%s\ntimeoutSeconds=%d\n",
+			r.cfg.LLMEnabled,
+			r.cfg.LLMProvider,
+			r.cfg.LLMModel,
+			r.cfg.LLMNamespace,
+			r.cfg.LLMDeploymentName,
+			r.cfg.LLMOllamaURL,
+			r.cfg.LLMTimeoutSeconds,
+		), nil
+	})
+
+	if !llmConfigured(r.cfg) {
+		r.writeCapture(filepath.Join(outDir, "llm", "status.txt"), func() (string, error) {
+			return "LLM provider is disabled in this run\n", nil
+		})
+		return
+	}
+
+	r.writeCapture(filepath.Join(outDir, "llm", "deployments.yaml"), func() (string, error) {
+		list, err := r.clients.Clientset.AppsV1().Deployments(r.cfg.LLMNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return "", err
+		}
+		return marshalYAML(list), nil
+	})
+	r.writeCapture(filepath.Join(outDir, "llm", "pods.yaml"), func() (string, error) {
+		list, err := r.clients.Clientset.CoreV1().Pods(r.cfg.LLMNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return "", err
+		}
+		return marshalYAML(list), nil
+	})
+	r.writeCapture(filepath.Join(outDir, "llm", "services.yaml"), func() (string, error) {
+		list, err := r.clients.Clientset.CoreV1().Services(r.cfg.LLMNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return "", err
+		}
+		return marshalYAML(list), nil
+	})
+	r.writeCapture(filepath.Join(outDir, "llm", "ollama-logs.txt"), func() (string, error) {
+		pod := deploymentPodName(ctx, r.clients, r.cfg.LLMNamespace, map[string]string{"app.kubernetes.io/name": "ollama"})
+		if strings.TrimSpace(pod) == "" {
+			return fmt.Sprintf("ollama pod not found in namespace %s\n", r.cfg.LLMNamespace), nil
+		}
+		return getPodLogsIfExists(ctx, r.clients, r.cfg.LLMNamespace, pod, "ollama", 2000)
+	})
+
+	pod := deploymentPodName(ctx, r.clients, r.cfg.LLMNamespace, map[string]string{"app.kubernetes.io/name": "ollama"})
+	if strings.TrimSpace(pod) == "" {
+		r.writeCapture(filepath.Join(outDir, "llm", "api-status.txt"), func() (string, error) {
+			return fmt.Sprintf("ollama pod not found in namespace %s\n", r.cfg.LLMNamespace), nil
+		})
+		return
+	}
+
+	pf, err := StartPodPortForward(r.clients, r.cfg.LLMNamespace, pod, 19114, 11434)
+	if err != nil {
+		r.writeCapture(filepath.Join(outDir, "logs", "ollama-port-forward.log"), func() (string, error) {
+			return "", err
+		})
+		return
+	}
+	if err := pf.WaitReady(30 * time.Second); err != nil {
+		r.writeCapture(filepath.Join(outDir, "logs", "ollama-port-forward.log"), func() (string, error) {
+			return "", err
+		})
+		return
+	}
+	defer pf.Close()
+
+	base := "http://127.0.0.1:19114"
+	r.writeCapture(filepath.Join(outDir, "llm", "api-tags.json"), func() (string, error) {
+		return httpGET(ctx, base+"/api/tags", 15*time.Second)
+	})
+	r.writeCapture(filepath.Join(outDir, "llm", "api-ps.json"), func() (string, error) {
+		return httpGET(ctx, base+"/api/ps", 15*time.Second)
+	})
+	r.writeCapture(filepath.Join(outDir, "llm", "api-generate-smoke.json"), func() (string, error) {
+		if strings.TrimSpace(r.cfg.LLMModel) == "" {
+			return "skipped: model is empty\n", nil
+		}
+		timeout := time.Duration(r.cfg.LLMTimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 90 * time.Second
+		}
+		payload := map[string]interface{}{
+			"model":  r.cfg.LLMModel,
+			"prompt": "Reply with the single word OK.",
+			"stream": false,
+			"options": map[string]interface{}{
+				"num_predict": 16,
+			},
+		}
+		return httpPostJSON(ctx, base+"/api/generate", payload, timeout)
+	})
+	_ = writeFile(filepath.Join(outDir, "logs", "ollama-port-forward.log"), pf.Logs())
+}
+
 func namespacedResourcesText(names []string) string {
 	sort.Strings(names)
 	if len(names) == 0 {
@@ -401,7 +510,7 @@ func (r *DiagnosticsRunner) Run(ctx context.Context) error {
 	if outDir == "" {
 		outDir = "/tmp/cpo-ci-diagnostics"
 	}
-	for _, sub := range []string{"cluster", "operator", "monitoring", "prometheus", "alertmanager", "logs", "meta"} {
+	for _, sub := range []string{"cluster", "operator", "monitoring", "prometheus", "alertmanager", "llm", "logs", "meta"} {
 		if err := ensureDir(filepath.Join(outDir, sub)); err != nil {
 			return err
 		}
@@ -411,6 +520,7 @@ func (r *DiagnosticsRunner) Run(ctx context.Context) error {
 	r.captureOperatorAndMonitoring(ctx, outDir)
 	r.capturePrometheusAPI(ctx, outDir)
 	r.captureAlertmanagerAPI(ctx, outDir)
+	r.captureLLM(ctx, outDir)
 
 	if _, err := civerify.WriteDiagnosticsSummary(outDir, r.cfg.PlanName); err != nil {
 		_ = writeFile(filepath.Join(outDir, "summary.txt"), fmt.Sprintf("Capacity Planning CI Diagnostics Summary\nGeneratedAtUTC: %s\nPlanName: %s\n\n[Summary]\n- Summary generation failed: %v\n", time.Now().UTC().Format(time.RFC3339), r.cfg.PlanName, err))

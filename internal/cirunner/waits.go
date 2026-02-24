@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -268,19 +269,35 @@ func waitForPVCsBound(ctx context.Context, c *Clients, namespace string, pvcName
 
 func waitForCapacityPlanReconcile(ctx context.Context, c *Clients, planName string, timeout, interval time.Duration) (*metav1.Time, error) {
 	var last *metav1.Time
+	lastObserved := "not observed"
 	err := waitUntil(ctx, timeout, interval, fmt.Sprintf("capacityplan/%s first reconcile", planName), func(ctx context.Context) (bool, error) {
 		var cp capacityv1.CapacityPlan
 		if err := c.Controller.Get(ctx, types.NamespacedName{Name: planName}, &cp); err != nil {
+			if apierrors.IsNotFound(err) {
+				lastObserved = "capacity plan not found"
+				return false, nil
+			}
+			lastObserved = fmt.Sprintf("get failed: %v", err)
 			return false, nil
 		}
 		if cp.Status.LastReconcileTime == nil {
+			conds := make([]string, 0, len(cp.Status.Conditions))
+			for _, cond := range cp.Status.Conditions {
+				conds = append(conds, fmt.Sprintf("%s=%s(%s)", cond.Type, cond.Status, cond.Reason))
+			}
+			condSummary := strings.Join(conds, ",")
+			if condSummary == "" {
+				condSummary = "none"
+			}
+			lastObserved = fmt.Sprintf("generation=%d observedGeneration=%d lastReconcile=nil conditions=[%s]", cp.Generation, cp.Status.ObservedGeneration, condSummary)
 			return false, nil
 		}
 		last = cp.Status.LastReconcileTime.DeepCopy()
+		lastObserved = fmt.Sprintf("lastReconcile=%s", cp.Status.LastReconcileTime.UTC().Format(time.RFC3339))
 		return true, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w (last observed: %s)", err, lastObserved)
 	}
 	return last, nil
 }
