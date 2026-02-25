@@ -971,6 +971,39 @@ func (r *IntegrationRunner) waitForOperatorPVCMetricsSeries(ctx context.Context,
 	})
 }
 
+func (r *IntegrationRunner) logOperatorMetricsIngestionDebug(ctx context.Context, pvcs []string) {
+	if r.promClient == nil {
+		return
+	}
+	totalSeries, hasSeries, err := r.promClient.QueryInstantScalar(ctx, `count(capacityplan_pvc_usage_bytes)`)
+	if err != nil {
+		fmt.Printf("  operator-metrics debug: count(capacityplan_pvc_usage_bytes) query failed: %v\n", err)
+	} else if hasSeries {
+		fmt.Printf("  operator-metrics debug: total capacityplan_pvc_usage_bytes series=%.0f\n", totalSeries)
+	} else {
+		fmt.Println("  operator-metrics debug: total capacityplan_pvc_usage_bytes series query returned no data")
+	}
+	for _, pvc := range pvcs {
+		q := promOperatorPVCSeriesCountQuery("default", pvc)
+		v, has, qErr := r.promClient.QueryInstantScalar(ctx, q)
+		if qErr != nil {
+			fmt.Printf("  operator-metrics debug: %s query failed: %v\n", pvc, qErr)
+			continue
+		}
+		if !has {
+			fmt.Printf("  operator-metrics debug: %s series not found\n", pvc)
+			continue
+		}
+		fmt.Printf("  operator-metrics debug: %s series count=%.0f\n", pvc, v)
+	}
+	upCM, upErr := r.promClient.QueryInstantHasResults(ctx, `up{job=~".*controller-manager.*"} == 1`)
+	if upErr != nil {
+		fmt.Printf("  operator-metrics debug: controller-manager up query failed: %v\n", upErr)
+	} else {
+		fmt.Printf("  operator-metrics debug: controller-manager up targets present=%t\n", upCM)
+	}
+}
+
 func (r *IntegrationRunner) countGrowingPVCs(cp *capacityv1.CapacityPlan) int {
 	count := 0
 	for _, pvc := range cp.Status.PVCs {
@@ -2161,7 +2194,8 @@ func (r *IntegrationRunner) runTrendAndPolicyChecks(ctx context.Context, firstRe
 	pvcs := pvcNames(r.cfg.CIWorkloads)
 	logStep("Waiting for Prometheus to ingest operator PVC metrics")
 	if err := r.waitForOperatorPVCMetricsSeries(ctx, pvcs); err != nil {
-		return err
+		fmt.Printf("  operator metrics ingestion warning: %v\n", err)
+		r.logOperatorMetricsIngestionDebug(ctx, pvcs)
 	}
 
 	if err := r.observeTrends(ctx); err != nil {

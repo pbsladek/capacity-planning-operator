@@ -12,12 +12,12 @@ spec:
       args:
         - |
           set -eu
-          # Bursty growth: repeated high-write bursts with short pauses (~288Mi total).
+          # Bursty growth: repeated bursts across a longer window (~288Mi total).
           burst=0
-          while [ "${burst}" -lt 6 ]; do
+          while [ "${burst}" -lt 16 ]; do
             burst=$((burst + 1))
-            for i in $(seq 1 6); do
-              dd if=/dev/zero of="/data/burst-${burst}-${i}.bin" bs=1M count=8 >/dev/null 2>&1
+            for i in $(seq 1 3); do
+              dd if=/dev/zero of="/data/burst-${burst}-${i}.bin" bs=1M count=6 >/dev/null 2>&1
               sync
               sleep 2
             done
