@@ -123,3 +123,18 @@ func BuildPVCGrowthDerivQuery(namespace, pvcName string, windowSeconds int) stri
 		windowSeconds,
 	)
 }
+
+// BuildOperatorPVCGrowthDerivQuery builds a deriv query from the operator-exported
+// capacityplan_pvc_usage_bytes gauge. This metric is sourced from the same watcher
+// samples that feed CapacityPlan status, so it is preferred for growth math cross-checks.
+func BuildOperatorPVCGrowthDerivQuery(namespace, pvcName string, windowSeconds int) string {
+	if windowSeconds < 1 {
+		windowSeconds = 1
+	}
+	return fmt.Sprintf(
+		`max(deriv(capacityplan_pvc_usage_bytes{namespace=%q,pvc=%q}[%ds])) * 86400`,
+		namespace,
+		pvcName,
+		windowSeconds,
+	)
+}
