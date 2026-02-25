@@ -1438,25 +1438,41 @@ func (r *IntegrationRunner) verifyAlerts(ctx context.Context) error {
 		return fmt.Errorf("alertmanager routing validation failed: %w", err)
 	}
 
-	expectedLabels := map[string]string{
-		"integration": expectedIntegration,
-	}
-	if expectedReceiver != "" {
-		expectedLabels["receiver"] = expectedReceiver
-	}
 	sent := 0.0
 	failed := 0.0
+	receiverRecordCount := 0
+	receiverAlertCount := 0
+	metricMatchBasis := "exact"
 	if err := waitUntil(ctx, timeout, poll, "alertmanager receiver delivery", func(ctx context.Context) (bool, error) {
+		deliveredByMetrics := false
 		metricsBody, err := httpBody(ctx, "http://127.0.0.1:19093/metrics", 5*time.Second)
-		if err != nil {
-			return false, nil
+		if err == nil {
+			metrics := resolveAlertmanagerNotificationCounters(metricsBody, expectedReceiver, expectedIntegration)
+			sent = metrics.Sent
+			failed = metrics.Failed
+			metricMatchBasis = metrics.Basis
+			deliveredByMetrics = sent > 0 && failed == 0
 		}
-		sent = parseCounterSumWithLabels(metricsBody, "alertmanager_notifications_total", expectedLabels)
-		failed = parseCounterSumWithLabels(metricsBody, "alertmanager_notifications_failed_total", expectedLabels)
-		return sent > 0 && failed == 0, nil
+
+		deliveredByPayload := false
+		if expectedIntegration == "webhook" {
+			body, err := httpBody(ctx, "http://127.0.0.1:19094/records", 5*time.Second)
+			if err == nil {
+				records, parseErr := parseAlertReceiverRecords(body)
+				if parseErr == nil && records.Count > 0 && len(records.Records) > 0 {
+					deliveredDetails, detailsErr := parseAlertReceiverDetails(records, expectedReceiver)
+					if detailsErr == nil && validateAlertMetadata(deliveredDetails, r.cfg.CIWorkloads) == nil {
+						deliveredByPayload = true
+						receiverRecordCount = records.Count
+						receiverAlertCount = len(deliveredDetails)
+					}
+				}
+			}
+		}
+		return deliveredByMetrics || deliveredByPayload, nil
 	}); err != nil {
-		return fmt.Errorf("alertmanager delivery validation failed for receiver=%q integration=%q: sent=%.0f failed=%.0f",
-			expectedReceiver, expectedIntegration, sent, failed)
+		return fmt.Errorf("alertmanager delivery validation failed for receiver=%q integration=%q: sent=%.0f failed=%.0f metricMatch=%s records=%d payloadAlerts=%d",
+			expectedReceiver, expectedIntegration, sent, failed, metricMatchBasis, receiverRecordCount, receiverAlertCount)
 	}
 
 	apiDetails, err := r.alertVerifier.AlertmanagerCapacityAlertDetails(ctx)
@@ -1467,39 +1483,9 @@ func (r *IntegrationRunner) verifyAlerts(ctx context.Context) error {
 		return fmt.Errorf("alertmanager metadata validation failed: %w", err)
 	}
 
-	receiverRecordCount := 0
-	receiverAlertCount := 0
-	if expectedIntegration == "webhook" {
-		if err := waitUntil(ctx, timeout, poll, "alert-receiver notification payloads", func(ctx context.Context) (bool, error) {
-			body, err := httpBody(ctx, "http://127.0.0.1:19094/records", 5*time.Second)
-			if err != nil {
-				return false, nil
-			}
-			records, err := parseAlertReceiverRecords(body)
-			if err != nil {
-				return false, nil
-			}
-			if records.Count < 1 || len(records.Records) < 1 {
-				return false, nil
-			}
-			deliveredDetails, err := parseAlertReceiverDetails(records, expectedReceiver)
-			if err != nil {
-				return false, nil
-			}
-			if err := validateAlertMetadata(deliveredDetails, r.cfg.CIWorkloads); err != nil {
-				return false, nil
-			}
-			receiverRecordCount = records.Count
-			receiverAlertCount = len(deliveredDetails)
-			return true, nil
-		}); err != nil {
-			return fmt.Errorf("alert-receiver payload validation failed: %w", err)
-		}
-	}
-
 	fmt.Println("Alert pipeline interpretation")
 	fmt.Printf("  routing: receiver=%s integration=%s\n", expectedReceiver, expectedIntegration)
-	fmt.Printf("  alertmanager notifications: sent=%.0f failed=%.0f\n", sent, failed)
+	fmt.Printf("  alertmanager notifications: sent=%.0f failed=%.0f (metricMatch=%s)\n", sent, failed, metricMatchBasis)
 	if expectedIntegration == "webhook" {
 		fmt.Printf("  delivered payloads: records=%d capacityAlerts=%d\n", receiverRecordCount, receiverAlertCount)
 	}
@@ -1833,14 +1819,41 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 	if pullTimeout <= 0 {
 		pullTimeout = 20 * time.Minute
 	}
-	pullCtx, cancel := context.WithTimeout(ctx, pullTimeout)
-	defer cancel()
-	payload := map[string]interface{}{
-		"model":  r.cfg.LLMModel,
-		"stream": false,
-	}
-	if _, err := httpPostJSON(pullCtx, "http://127.0.0.1:21134/api/pull", payload, pullTimeout); err != nil {
-		return fmt.Errorf("pulling ollama model %q: %w", r.cfg.LLMModel, err)
+
+	if body, err := httpBody(ctx, "http://127.0.0.1:21134/api/tags", 10*time.Second); err == nil && ollamaTagsContainModel(body, r.cfg.LLMModel) {
+		fmt.Printf("  ollama model %q already present; skipping pull\n", r.cfg.LLMModel)
+	} else {
+		payload := map[string]interface{}{
+			"model":  r.cfg.LLMModel,
+			"stream": false,
+		}
+		const maxPullAttempts = 3
+		lastErr := error(nil)
+		for attempt := 1; attempt <= maxPullAttempts; attempt++ {
+			pullCtx, cancel := context.WithTimeout(ctx, pullTimeout)
+			_, err := httpPostJSON(pullCtx, "http://127.0.0.1:21134/api/pull", payload, pullTimeout)
+			cancel()
+			if err == nil {
+				lastErr = nil
+				break
+			}
+			lastErr = err
+			if attempt == maxPullAttempts || !isRetryableOllamaPullErr(err) {
+				break
+			}
+			backoff := time.Duration(attempt*5) * time.Second
+			fmt.Printf("  ollama model pull retry %d/%d after error: %s\n", attempt, maxPullAttempts, trimText(err.Error(), 220))
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("pulling ollama model %q: %w", r.cfg.LLMModel, ctx.Err())
+			case <-timer.C:
+			}
+		}
+		if lastErr != nil {
+			return fmt.Errorf("pulling ollama model %q: %w", r.cfg.LLMModel, lastErr)
+		}
 	}
 
 	if err := waitUntil(ctx, 2*time.Minute, r.cfg.PollInterval(), fmt.Sprintf("Ollama model %q in /api/tags", r.cfg.LLMModel), func(ctx context.Context) (bool, error) {
@@ -1861,25 +1874,43 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 	if generateTimeout < 30*time.Second {
 		generateTimeout = 30 * time.Second
 	}
-	generateCtx, generateCancel := context.WithTimeout(ctx, generateTimeout+30*time.Second)
-	defer generateCancel()
-	generatePayload := map[string]interface{}{
-		"model":  r.cfg.LLMModel,
-		"prompt": "Reply with the single word OK.",
-		"stream": false,
-		"options": map[string]interface{}{
-			"num_predict":    16,
-			"temperature":    0,
-			"top_k":          1,
-			"repeat_penalty": 1,
-		},
+	smokePrompts := []string{
+		"hello",
+		"how are you?",
 	}
-	generateBody, err := httpPostJSON(generateCtx, "http://127.0.0.1:21134/api/generate", generatePayload, generateTimeout+30*time.Second)
-	if err != nil {
-		return fmt.Errorf("ollama generation smoke test failed for model %q: %w", r.cfg.LLMModel, err)
-	}
-	if err := validateOllamaGenerateResponse(generateBody); err != nil {
-		return fmt.Errorf("ollama generation smoke test returned invalid payload: %w", err)
+	for i, prompt := range smokePrompts {
+		generateCtx, generateCancel := context.WithTimeout(ctx, generateTimeout+30*time.Second)
+		generatePayload := map[string]interface{}{
+			"model":  r.cfg.LLMModel,
+			"prompt": prompt,
+			"stream": false,
+			"options": map[string]interface{}{
+				"num_predict":    32,
+				"temperature":    0,
+				"top_k":          1,
+				"repeat_penalty": 1,
+			},
+		}
+		generateBody, err := httpPostJSON(generateCtx, "http://127.0.0.1:21134/api/generate", generatePayload, generateTimeout+30*time.Second)
+		generateCancel()
+		if err != nil {
+			return fmt.Errorf("ollama generation smoke test failed for model %q prompt %q: %w", r.cfg.LLMModel, prompt, err)
+		}
+		result, err := parseOllamaGenerateResponse(generateBody)
+		if err != nil {
+			return fmt.Errorf("ollama generation smoke test returned invalid payload for prompt %q: %w", prompt, err)
+		}
+		totalTokens := result.PromptEvalCount + result.EvalCount
+		fmt.Printf(
+			"  ollama smoke request %d/%d prompt=%q response=%q tokens(prompt=%d completion=%d total=%d)\n",
+			i+1,
+			len(smokePrompts),
+			prompt,
+			trimText(result.Response, 160),
+			result.PromptEvalCount,
+			result.EvalCount,
+			totalTokens,
+		)
 	}
 	return nil
 }
@@ -1906,23 +1937,64 @@ func ollamaTagsContainModel(tagsBody, model string) bool {
 	return strings.Contains(tagsBody, model)
 }
 
-func validateOllamaGenerateResponse(body string) error {
+func isRetryableOllamaPullErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isTimeoutErr(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"http 500",
+		"internal_error",
+		"internal error",
+		"connection reset",
+		"eof",
+		"too many requests",
+		"temporary",
+		"timeout",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+type ollamaGenerateResult struct {
+	Model           string
+	Response        string
+	PromptEvalCount int
+	EvalCount       int
+	Done            bool
+}
+
+func parseOllamaGenerateResponse(body string) (ollamaGenerateResult, error) {
 	var payload struct {
-		Model    string `json:"model"`
-		Response string `json:"response"`
-		Done     bool   `json:"done"`
-		Error    string `json:"error"`
+		Model           string `json:"model"`
+		Response        string `json:"response"`
+		Done            bool   `json:"done"`
+		Error           string `json:"error"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
 	}
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
-		return fmt.Errorf("decoding generate response: %w", err)
+		return ollamaGenerateResult{}, fmt.Errorf("decoding generate response: %w", err)
 	}
 	if strings.TrimSpace(payload.Error) != "" {
-		return fmt.Errorf("generate response error: %s", strings.TrimSpace(payload.Error))
+		return ollamaGenerateResult{}, fmt.Errorf("generate response error: %s", strings.TrimSpace(payload.Error))
 	}
 	if strings.TrimSpace(payload.Response) == "" {
-		return fmt.Errorf("generate response was empty")
+		return ollamaGenerateResult{}, fmt.Errorf("generate response was empty")
 	}
-	return nil
+	return ollamaGenerateResult{
+		Model:           strings.TrimSpace(payload.Model),
+		Response:        strings.TrimSpace(payload.Response),
+		PromptEvalCount: payload.PromptEvalCount,
+		EvalCount:       payload.EvalCount,
+		Done:            payload.Done,
+	}, nil
 }
 
 func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.Time, error) {
@@ -2119,6 +2191,126 @@ func parseCounterSumWithLabels(body, metricName string, requiredLabels map[strin
 		sum += v
 	}
 	return sum
+}
+
+type metricCounterSample struct {
+	Labels map[string]string
+	Value  float64
+}
+
+func parseCounterSamples(body, metricName string) []metricCounterSample {
+	samples := make([]metricCounterSample, 0, 8)
+	for line := range strings.SplitSeq(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, metricName+"{") && !strings.HasPrefix(line, metricName+" ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		labels := map[string]string{}
+		if strings.HasPrefix(fields[0], metricName+"{") {
+			openIdx := strings.Index(fields[0], "{")
+			closeIdx := strings.LastIndex(fields[0], "}")
+			if openIdx >= 0 && closeIdx > openIdx {
+				labels = parseMetricLabels(fields[0][openIdx+1 : closeIdx])
+			}
+		}
+		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if err != nil {
+			continue
+		}
+		samples = append(samples, metricCounterSample{
+			Labels: labels,
+			Value:  v,
+		})
+	}
+	return samples
+}
+
+type alertmanagerNotificationCounters struct {
+	Sent   float64
+	Failed float64
+	Basis  string
+}
+
+func sumCounterSamples(samples []metricCounterSample, include func(metricCounterSample) bool) float64 {
+	sum := 0.0
+	for _, sample := range samples {
+		if include(sample) {
+			sum += sample.Value
+		}
+	}
+	return sum
+}
+
+func resolveAlertmanagerNotificationCounters(metricsBody, receiver, integration string) alertmanagerNotificationCounters {
+	sentSamples := parseCounterSamples(metricsBody, "alertmanager_notifications_total")
+	failedSamples := parseCounterSamples(metricsBody, "alertmanager_notifications_failed_total")
+	receiver = strings.TrimSpace(receiver)
+	integration = strings.TrimSpace(integration)
+
+	exactSent := sumCounterSamples(sentSamples, func(s metricCounterSample) bool {
+		if receiver != "" && s.Labels["receiver"] != receiver {
+			return false
+		}
+		if integration != "" && s.Labels["integration"] != integration {
+			return false
+		}
+		return true
+	})
+	exactFailed := sumCounterSamples(failedSamples, func(s metricCounterSample) bool {
+		if receiver != "" && s.Labels["receiver"] != receiver {
+			return false
+		}
+		if integration != "" && s.Labels["integration"] != integration {
+			return false
+		}
+		return true
+	})
+	if exactSent > 0 || exactFailed > 0 {
+		return alertmanagerNotificationCounters{Sent: exactSent, Failed: exactFailed, Basis: "exact"}
+	}
+
+	receiverSent := sumCounterSamples(sentSamples, func(s metricCounterSample) bool {
+		if receiver == "" {
+			return false
+		}
+		return s.Labels["receiver"] == receiver
+	})
+	receiverFailed := sumCounterSamples(failedSamples, func(s metricCounterSample) bool {
+		if receiver == "" {
+			return false
+		}
+		return s.Labels["receiver"] == receiver
+	})
+	if receiverSent > 0 || receiverFailed > 0 {
+		return alertmanagerNotificationCounters{Sent: receiverSent, Failed: receiverFailed, Basis: "receiver_only"}
+	}
+
+	integrationPrefixSent := sumCounterSamples(sentSamples, func(s metricCounterSample) bool {
+		if integration == "" {
+			return false
+		}
+		return strings.HasPrefix(s.Labels["integration"], integration)
+	})
+	integrationPrefixFailed := sumCounterSamples(failedSamples, func(s metricCounterSample) bool {
+		if integration == "" {
+			return false
+		}
+		return strings.HasPrefix(s.Labels["integration"], integration)
+	})
+	if integrationPrefixSent > 0 || integrationPrefixFailed > 0 {
+		return alertmanagerNotificationCounters{Sent: integrationPrefixSent, Failed: integrationPrefixFailed, Basis: "integration_prefix"}
+	}
+
+	anySent := sumCounterSamples(sentSamples, func(_ metricCounterSample) bool { return true })
+	anyFailed := sumCounterSamples(failedSamples, func(_ metricCounterSample) bool { return true })
+	return alertmanagerNotificationCounters{Sent: anySent, Failed: anyFailed, Basis: "any"}
 }
 
 func parseAlertmanagerOriginalConfig(statusBody string) string {

@@ -31,6 +31,31 @@ alertmanager_notifications_failed_total{integration="webhook",receiver="ci-webho
 	}
 }
 
+func TestResolveAlertmanagerNotificationCounters(t *testing.T) {
+	t.Parallel()
+
+	body := `
+# HELP alertmanager_notifications_total Number of notifications sent.
+alertmanager_notifications_total{integration="webhook",receiver="ci-webhook"} 4
+alertmanager_notifications_total{integration="webhook[0]",receiver="ci-webhook"} 3
+alertmanager_notifications_failed_total{integration="webhook",receiver="ci-webhook"} 1
+alertmanager_notifications_failed_total{integration="webhook[0]",receiver="ci-webhook"} 2
+`
+	exact := resolveAlertmanagerNotificationCounters(body, "ci-webhook", "webhook")
+	if exact.Basis != "exact" || exact.Sent != 4 || exact.Failed != 1 {
+		t.Fatalf("exact counters mismatch: %+v", exact)
+	}
+
+	receiverOnlyBody := `
+alertmanager_notifications_total{integration="webhook[0]",receiver="ci-webhook"} 3
+alertmanager_notifications_failed_total{integration="webhook[0]",receiver="ci-webhook"} 2
+`
+	receiverOnly := resolveAlertmanagerNotificationCounters(receiverOnlyBody, "ci-webhook", "webhook")
+	if receiverOnly.Basis != "receiver_only" || receiverOnly.Sent != 3 || receiverOnly.Failed != 2 {
+		t.Fatalf("receiver-only counters mismatch: %+v", receiverOnly)
+	}
+}
+
 func TestValidateAlertmanagerRouteConfig(t *testing.T) {
 	t.Parallel()
 

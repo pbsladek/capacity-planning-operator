@@ -111,3 +111,27 @@ func TestGrowthComparisonHint(t *testing.T) {
 		t.Fatalf("unexpected hint: %q", hint)
 	}
 }
+
+func TestParseOllamaGenerateResponse(t *testing.T) {
+	raw := `{"model":"mistral:7b","response":"Hello!","done":true,"prompt_eval_count":5,"eval_count":8}`
+	got, err := parseOllamaGenerateResponse(raw)
+	if err != nil {
+		t.Fatalf("parseOllamaGenerateResponse err=%v", err)
+	}
+	if got.Model != "mistral:7b" {
+		t.Fatalf("model=%q", got.Model)
+	}
+	if got.Response != "Hello!" {
+		t.Fatalf("response=%q", got.Response)
+	}
+	if got.PromptEvalCount != 5 || got.EvalCount != 8 {
+		t.Fatalf("token counts prompt=%d eval=%d", got.PromptEvalCount, got.EvalCount)
+	}
+}
+
+func TestParseOllamaGenerateResponseError(t *testing.T) {
+	raw := `{"error":"model not found"}`
+	if _, err := parseOllamaGenerateResponse(raw); err == nil {
+		t.Fatalf("expected parse error for ollama error payload")
+	}
+}
