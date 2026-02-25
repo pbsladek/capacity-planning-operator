@@ -132,7 +132,10 @@ func BuildOperatorPVCGrowthDerivQuery(namespace, pvcName string, windowSeconds i
 		windowSeconds = 1
 	}
 	return fmt.Sprintf(
-		`max(deriv(capacityplan_pvc_usage_bytes{namespace=%q,pvc=%q}[%ds])) * 86400`,
+		`max((deriv(capacityplan_pvc_usage_bytes{namespace=%q,pvc=%q}[%ds])) or (deriv(capacityplan_pvc_usage_bytes{exported_namespace=%q,pvc=%q}[%ds]))) * 86400`,
+		namespace,
+		pvcName,
+		windowSeconds,
 		namespace,
 		pvcName,
 		windowSeconds,

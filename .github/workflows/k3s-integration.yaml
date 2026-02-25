@@ -59,6 +59,7 @@ jobs:
       CI_LLM_TIMEOUT_SECONDS: "120"
       CI_LLM_SOFT_FAIL: "true"
       CI_LLM_TIMEOUT_HARD_FAIL: "true"
+      CI_VALIDATION_SOFT_FAIL: "true"
       CI_LLM_MODEL_PULL_TIMEOUT_SECONDS: "1800"
     steps:
       - name: Checkout

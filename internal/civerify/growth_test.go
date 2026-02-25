@@ -142,7 +142,7 @@ func TestBuildPVCGrowthDerivQuery(t *testing.T) {
 
 func TestBuildOperatorPVCGrowthDerivQuery(t *testing.T) {
 	got := BuildOperatorPVCGrowthDerivQuery("default", "my-pvc", 240)
-	want := `max(deriv(capacityplan_pvc_usage_bytes{namespace="default",pvc="my-pvc"}[240s])) * 86400`
+	want := `max((deriv(capacityplan_pvc_usage_bytes{namespace="default",pvc="my-pvc"}[240s])) or (deriv(capacityplan_pvc_usage_bytes{exported_namespace="default",pvc="my-pvc"}[240s]))) * 86400`
 	if got != want {
 		t.Fatalf("unexpected query:\nwant: %s\ngot:  %s", want, got)
 	}

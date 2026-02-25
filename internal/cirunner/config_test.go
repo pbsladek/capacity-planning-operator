@@ -24,6 +24,7 @@ func TestLoadConfigUsesEnvOverrides(t *testing.T) {
 	t.Setenv("CI_LLM_PROVIDER", "ollama")
 	t.Setenv("CI_LLM_MODEL", "llama3.1:8b")
 	t.Setenv("CI_LLM_TIMEOUT_SECONDS", "120")
+	t.Setenv("CI_VALIDATION_SOFT_FAIL", "true")
 
 	cfg := LoadConfig()
 	if cfg.ClusterName != "mycluster" {
@@ -49,6 +50,9 @@ func TestLoadConfigUsesEnvOverrides(t *testing.T) {
 	}
 	if cfg.LLMTimeoutSeconds != 120 {
 		t.Fatalf("LLMTimeoutSeconds=%d", cfg.LLMTimeoutSeconds)
+	}
+	if !cfg.ValidationSoftFail {
+		t.Fatalf("ValidationSoftFail=%v", cfg.ValidationSoftFail)
 	}
 	if cfg.KubePromValuesExtraFile != "hack/ci/kube-prom-values-alerting.yaml" {
 		t.Fatalf("KubePromValuesExtraFile=%q", cfg.KubePromValuesExtraFile)

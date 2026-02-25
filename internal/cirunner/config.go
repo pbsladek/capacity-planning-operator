@@ -49,6 +49,7 @@ type Config struct {
 	LLMEnabled                      bool
 	LLMSoftFail                     bool
 	LLMTimeoutHardFail              bool
+	ValidationSoftFail              bool
 	LLMProvider                     string
 	LLMModel                        string
 	LLMTimeoutSeconds               int
@@ -186,6 +187,7 @@ func LoadConfig() Config {
 		LLMEnabled:                      llmEnabled,
 		LLMSoftFail:                     getenvBool("CI_LLM_SOFT_FAIL", true),
 		LLMTimeoutHardFail:              getenvBool("CI_LLM_TIMEOUT_HARD_FAIL", true),
+		ValidationSoftFail:              getenvBool("CI_VALIDATION_SOFT_FAIL", false),
 		LLMProvider:                     llmProvider,
 		LLMModel:                        getenvDefault("CI_LLM_MODEL", "mistral:7b"),
 		LLMTimeoutSeconds:               getenvInt("CI_LLM_TIMEOUT_SECONDS", 90),

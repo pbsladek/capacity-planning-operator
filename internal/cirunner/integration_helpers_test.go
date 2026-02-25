@@ -113,7 +113,7 @@ func TestGrowthComparisonHint(t *testing.T) {
 }
 
 func TestParseOllamaGenerateResponse(t *testing.T) {
-	raw := `{"model":"mistral:7b","response":"Hello!","done":true,"prompt_eval_count":5,"eval_count":8}`
+	raw := `{"model":"mistral:7b","response":"Hello!","done":true,"done_reason":"stop","prompt_eval_count":5,"eval_count":8}`
 	got, err := parseOllamaGenerateResponse(raw)
 	if err != nil {
 		t.Fatalf("parseOllamaGenerateResponse err=%v", err)
@@ -126,6 +126,9 @@ func TestParseOllamaGenerateResponse(t *testing.T) {
 	}
 	if got.PromptEvalCount != 5 || got.EvalCount != 8 {
 		t.Fatalf("token counts prompt=%d eval=%d", got.PromptEvalCount, got.EvalCount)
+	}
+	if got.DoneReason != "stop" {
+		t.Fatalf("doneReason=%q", got.DoneReason)
 	}
 }
 

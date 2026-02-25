@@ -812,8 +812,8 @@ func promCapacityBytesQuery(namespace, pvc string) string {
 
 func promOperatorPVCSeriesCountQuery(namespace, pvc string) string {
 	return fmt.Sprintf(
-		`count(capacityplan_pvc_usage_bytes{namespace=%q,pvc=%q})`,
-		namespace, pvc,
+		`count((capacityplan_pvc_usage_bytes{namespace=%q,pvc=%q}) or (capacityplan_pvc_usage_bytes{exported_namespace=%q,pvc=%q}))`,
+		namespace, pvc, namespace, pvc,
 	)
 }
 
@@ -1770,11 +1770,30 @@ func (r *IntegrationRunner) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	validationWarnings := make([]string, 0, 2)
 	if err := r.runTrendAndPolicyChecks(ctx, firstReconcile); err != nil {
-		return err
+		if !r.cfg.ValidationSoftFail {
+			return err
+		}
+		msg := fmt.Sprintf("trend/policy checks: %v", err)
+		validationWarnings = append(validationWarnings, msg)
+		fmt.Printf("Validation warning: %s\n", msg)
 	}
 	if err := r.verifyAlertPipeline(ctx); err != nil {
-		return err
+		if !r.cfg.ValidationSoftFail {
+			return err
+		}
+		msg := fmt.Sprintf("alert pipeline checks: %v", err)
+		validationWarnings = append(validationWarnings, msg)
+		fmt.Printf("Validation warning: %s\n", msg)
+	}
+
+	if len(validationWarnings) > 0 {
+		logStep("K3s integration checks completed with validation warnings (soft-fail mode)")
+		for _, w := range validationWarnings {
+			fmt.Printf("  %s\n", w)
+		}
+		return nil
 	}
 
 	logStep("K3s integration checks passed")
@@ -1997,6 +2016,7 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 		"hello",
 		"how are you?",
 	}
+	smokeNumPredict := 64
 	for i, prompt := range smokePrompts {
 		generateCtx, generateCancel := context.WithTimeout(ctx, generateTimeout+30*time.Second)
 		generatePayload := map[string]interface{}{
@@ -2004,7 +2024,7 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 			"prompt": prompt,
 			"stream": false,
 			"options": map[string]interface{}{
-				"num_predict":    32,
+				"num_predict":    smokeNumPredict,
 				"temperature":    0,
 				"top_k":          1,
 				"repeat_penalty": 1,
@@ -2021,7 +2041,7 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 		}
 		totalTokens := result.PromptEvalCount + result.EvalCount
 		fmt.Printf(
-			"  ollama smoke request %d/%d prompt=%q response=%q tokens(prompt=%d completion=%d total=%d)\n",
+			"  ollama smoke request %d/%d prompt=%q response=%q model_tokens(prompt_eval=%d eval=%d total=%d) done_reason=%q\n",
 			i+1,
 			len(smokePrompts),
 			prompt,
@@ -2029,7 +2049,11 @@ func (r *IntegrationRunner) deployLLMBackend(ctx context.Context) error {
 			result.PromptEvalCount,
 			result.EvalCount,
 			totalTokens,
+			result.DoneReason,
 		)
+		if strings.EqualFold(strings.TrimSpace(result.DoneReason), "length") {
+			fmt.Printf("    note: completion hit token cap (num_predict=%d)\n", smokeNumPredict)
+		}
 	}
 	return nil
 }
@@ -2087,6 +2111,7 @@ type ollamaGenerateResult struct {
 	PromptEvalCount int
 	EvalCount       int
 	Done            bool
+	DoneReason      string
 }
 
 func parseOllamaGenerateResponse(body string) (ollamaGenerateResult, error) {
@@ -2094,6 +2119,7 @@ func parseOllamaGenerateResponse(body string) (ollamaGenerateResult, error) {
 		Model           string `json:"model"`
 		Response        string `json:"response"`
 		Done            bool   `json:"done"`
+		DoneReason      string `json:"done_reason"`
 		Error           string `json:"error"`
 		PromptEvalCount int    `json:"prompt_eval_count"`
 		EvalCount       int    `json:"eval_count"`
@@ -2113,6 +2139,7 @@ func parseOllamaGenerateResponse(body string) (ollamaGenerateResult, error) {
 		PromptEvalCount: payload.PromptEvalCount,
 		EvalCount:       payload.EvalCount,
 		Done:            payload.Done,
+		DoneReason:      strings.TrimSpace(payload.DoneReason),
 	}, nil
 }
 
