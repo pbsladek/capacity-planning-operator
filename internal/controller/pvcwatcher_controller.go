@@ -99,7 +99,9 @@ func (r *PVCWatcherReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err != nil {
 		logger.V(1).Info("failed to get PVC usage from metrics client",
 			"error", err)
-		return ctrl.Result{}, nil
+		// Keep polling even on transient metrics failures; otherwise sampling can
+		// stall indefinitely until another PVC event occurs.
+		return ctrl.Result{RequeueAfter: r.getSampleInterval()}, nil
 	}
 
 	// Record the sample.

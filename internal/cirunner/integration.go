@@ -1009,43 +1009,70 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 	observedTrendWindow := r.observedTrendWindowSeconds()
 	sampleWindow := r.sampleRetentionWindowSeconds()
 	fmt.Printf("  growth-compare lookback window: %ds (configured=%ds observedTrend=%ds sampleWindow=%ds)\n", window, configuredWindow, observedTrendWindow, sampleWindow)
-	sourceCounts := map[string]int{
-		"operator":         0,
-		"kubelet_fallback": 0,
-	}
-	summary, compareErr := civerify.CompareGrowth(ctx, cpGrowth, func(ctx context.Context, pvcName string) (float64, bool, error) {
-		operatorQuery := civerify.BuildOperatorPVCGrowthDerivQuery("default", pvcName, window)
-		operatorValue, operatorHasData, operatorErr := r.promClient.QueryInstantScalar(ctx, operatorQuery)
-		if operatorErr == nil && operatorHasData {
-			// If operator deriv is zero while status says positive growth, fall back to kubelet deriv
-			// once before accepting zero. This handles startup/backfill timing divergence.
-			if operatorValue != 0 || statusByPVC[pvcName] <= 0 {
+	runComparison := func(compareWindow int) (civerify.ComparisonSummary, error, map[string]int) {
+		sourceCounts := map[string]int{
+			"operator":         0,
+			"kubelet_fallback": 0,
+		}
+		summary, compareErr := civerify.CompareGrowth(ctx, cpGrowth, func(ctx context.Context, pvcName string) (float64, bool, error) {
+			operatorQuery := civerify.BuildOperatorPVCGrowthDerivQuery("default", pvcName, compareWindow)
+			operatorValue, operatorHasData, operatorErr := r.promClient.QueryInstantScalar(ctx, operatorQuery)
+			if operatorErr == nil && operatorHasData {
+				// If operator deriv is zero while status says positive growth, fall back to kubelet deriv
+				// once before accepting zero. This handles startup/backfill timing divergence.
+				if operatorValue != 0 || statusByPVC[pvcName] <= 0 {
+					sourceCounts["operator"]++
+					return operatorValue, operatorHasData, nil
+				}
+				kubeletQuery := civerify.BuildPVCGrowthDerivQuery("default", pvcName, compareWindow)
+				kubeletValue, kubeletHasData, kubeletErr := r.promClient.QueryInstantScalar(ctx, kubeletQuery)
+				if kubeletErr == nil && kubeletHasData && kubeletValue != 0 {
+					sourceCounts["kubelet_fallback"]++
+					return kubeletValue, kubeletHasData, nil
+				}
 				sourceCounts["operator"]++
 				return operatorValue, operatorHasData, nil
 			}
-			kubeletQuery := civerify.BuildPVCGrowthDerivQuery("default", pvcName, window)
+
+			kubeletQuery := civerify.BuildPVCGrowthDerivQuery("default", pvcName, compareWindow)
 			kubeletValue, kubeletHasData, kubeletErr := r.promClient.QueryInstantScalar(ctx, kubeletQuery)
-			if kubeletErr == nil && kubeletHasData && kubeletValue != 0 {
+			if kubeletErr == nil {
 				sourceCounts["kubelet_fallback"]++
 				return kubeletValue, kubeletHasData, nil
 			}
-			sourceCounts["operator"]++
-			return operatorValue, operatorHasData, nil
-		}
+			if operatorErr != nil {
+				return 0, false, fmt.Errorf("operator deriv query failed: %w; kubelet deriv query failed: %v", operatorErr, kubeletErr)
+			}
+			return 0, false, kubeletErr
+		}, opts)
+		return summary, compareErr, sourceCounts
+	}
 
-		kubeletQuery := civerify.BuildPVCGrowthDerivQuery("default", pvcName, window)
-		kubeletValue, kubeletHasData, kubeletErr := r.promClient.QueryInstantScalar(ctx, kubeletQuery)
-		if kubeletErr == nil {
-			sourceCounts["kubelet_fallback"]++
-			return kubeletValue, kubeletHasData, nil
-		}
-		if operatorErr != nil {
-			return 0, false, fmt.Errorf("operator deriv query failed: %w; kubelet deriv query failed: %v", operatorErr, kubeletErr)
-		}
-		return 0, false, kubeletErr
-	}, opts)
+	summary, compareErr, sourceCounts := runComparison(window)
 	fmt.Printf("  growth-compare query source: operator=%d kubelet_fallback=%d\n", sourceCounts["operator"], sourceCounts["kubelet_fallback"])
 	civerify.PrintGrowthSummary(os.Stdout, summary, window)
+	if compareErr != nil {
+		if hint := growthComparisonHint(summary); hint != "" {
+			retryWindow := window
+			if sampleWindow > retryWindow {
+				retryWindow = sampleWindow
+			}
+			if retryWindow > window {
+				fmt.Printf("  growth-compare retry: widening lookback to %ds (previous=%ds)\n", retryWindow, window)
+				retrySummary, retryErr, retrySourceCounts := runComparison(retryWindow)
+				fmt.Printf("  growth-compare query source (retry): operator=%d kubelet_fallback=%d\n", retrySourceCounts["operator"], retrySourceCounts["kubelet_fallback"])
+				civerify.PrintGrowthSummary(os.Stdout, retrySummary, retryWindow)
+				if retryErr == nil {
+					summary = retrySummary
+					compareErr = nil
+					window = retryWindow
+				} else {
+					summary = retrySummary
+					compareErr = retryErr
+				}
+			}
+		}
+	}
 	if compareErr != nil {
 		if hint := growthComparisonHint(summary); hint != "" {
 			return fmt.Errorf("%w (%s)", compareErr, hint)
