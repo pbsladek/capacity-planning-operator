@@ -26,7 +26,7 @@ jobs:
   alerting-e2e:
     name: K3s Nightly (Alert Delivery Path)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
       CLUSTER_NAME: cpo-nightly
       OPERATOR_IMAGE: capacity-planning-operator:nightly
@@ -41,15 +41,16 @@ jobs:
       KUBECTL_VERSION: v1.32.2
       HELM_VERSION: v3.16.4
       KUBE_PROM_STACK_CHART_VERSION: 65.8.1
-      TREND_OBSERVE_SECONDS: "600"
+      TREND_OBSERVE_SECONDS: "1200"
       USAGE_SNAPSHOT_INTERVAL_SECONDS: "120"
-      MIN_TREND_OBSERVE_SECONDS: "480"
-      MIN_TREND_SNAPSHOTS: "4"
+      MIN_TREND_OBSERVE_SECONDS: "960"
+      MIN_TREND_SNAPSHOTS: "8"
       MONITORING_ROLLOUT_TIMEOUT_SECONDS: "900"
-      ALERT_PROPAGATION_TIMEOUT_SECONDS: "600"
+      ALERT_PROPAGATION_TIMEOUT_SECONDS: "900"
       PLAN_SAMPLE_INTERVAL: 5s
       PLAN_RECONCILE_INTERVAL: 15s
       PLAN_SAMPLE_RETENTION: "256"
+      CI_WORKLOAD_MANIFEST_DIR: hack/ci/manifests/workloads-nightly
       CI_ENABLE_LLM: "true"
       CI_LLM_PROVIDER: "ollama"
       CI_LLM_MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.llm_model || 'mistral:7b' }}
@@ -131,6 +132,8 @@ jobs:
         run: bash hack/ci/import_image_k3d.sh
 
       - name: Run Core K3s Integration
+        env:
+          EXPECTED_KUBE_CONTEXT: k3d-${{ env.CLUSTER_NAME }}
         run: bash hack/ci/k3s_integration.sh
 
       - name: Run Alert Delivery Validation

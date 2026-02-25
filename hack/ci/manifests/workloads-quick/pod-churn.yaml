@@ -12,15 +12,15 @@ spec:
       args:
         - |
           set -eu
-          # Churn pattern over ~32m with periodic cleanup (~720Mi net).
-          for i in $(seq 1 240); do
-            dd if=/dev/zero of="/data/churn-${i}.bin" bs=1M count=6 >/dev/null 2>&1
+          # Quick churn profile: alternating writes/cleanup over ~12m (~600Mi net on 1Gi PVC).
+          for i in $(seq 1 120); do
+            dd if=/dev/zero of="/data/churn-${i}.bin" bs=1M count=10 >/dev/null 2>&1
             sync
             if [ $((i % 4)) -eq 0 ]; then
               rm -f /data/churn-$((i-3)).bin /data/churn-$((i-2)).bin 2>/dev/null || true
               sync
             fi
-            sleep 8
+            sleep 6
           done
           sleep 1800
       volumeMounts:

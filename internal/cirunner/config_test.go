@@ -25,6 +25,7 @@ func TestLoadConfigUsesEnvOverrides(t *testing.T) {
 	t.Setenv("CI_LLM_MODEL", "llama3.1:8b")
 	t.Setenv("CI_LLM_TIMEOUT_SECONDS", "120")
 	t.Setenv("CI_VALIDATION_SOFT_FAIL", "true")
+	t.Setenv("CI_WORKLOAD_MANIFEST_DIR", "hack/ci/manifests/workloads-nightly")
 
 	cfg := LoadConfig()
 	if cfg.ClusterName != "mycluster" {
@@ -74,6 +75,12 @@ func TestLoadConfigUsesEnvOverrides(t *testing.T) {
 	}
 	if cfg.AlertmanagerExpectedIntegration != "webhook" {
 		t.Fatalf("AlertmanagerExpectedIntegration=%q", cfg.AlertmanagerExpectedIntegration)
+	}
+	if cfg.CIWorkloadManifestDir != "hack/ci/manifests/workloads-nightly" {
+		t.Fatalf("CIWorkloadManifestDir=%q", cfg.CIWorkloadManifestDir)
+	}
+	if cfg.WorkloadManifestDir() != "hack/ci/manifests/workloads-nightly" {
+		t.Fatalf("WorkloadManifestDir=%q", cfg.WorkloadManifestDir())
 	}
 }
 

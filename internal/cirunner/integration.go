@@ -2148,7 +2148,8 @@ func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.
 	if err := r.setupLLMBackendForWorkload(ctx); err != nil {
 		return nil, err
 	}
-	if err := ApplyWorkloadStorageManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
+	workloadsDir := r.cfg.WorkloadManifestDir()
+	if err := ApplyWorkloadStorageManifestsFromDir(ctx, r.clients, workloadsDir); err != nil {
 		return nil, err
 	}
 
@@ -2172,7 +2173,7 @@ func (r *IntegrationRunner) deployWorkloadAndPlan(ctx context.Context) (*metav1.
 	if err := r.prepareDedicatedPVCBackends(ctx, mounts); err != nil {
 		return nil, err
 	}
-	if err := ApplyWorkloadPodManifests(ctx, r.clients, r.cfg.CIManifestDir); err != nil {
+	if err := ApplyWorkloadPodManifestsFromDir(ctx, r.clients, workloadsDir); err != nil {
 		return nil, err
 	}
 	if err := waitForPodsScheduled(ctx, r.clients, "default", r.cfg.CIWorkloads, 3*time.Minute, r.cfg.PollInterval()); err != nil {

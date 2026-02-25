@@ -12,12 +12,12 @@ spec:
       args:
         - |
           set -eu
-          # Delayed growth: idle warm-up then sustained writes over ~8m10s (~240Mi total).
-          sleep 90
-          for i in $(seq 1 40); do
-            dd if=/dev/zero of="/data/delayed-${i}.bin" bs=1M count=6 >/dev/null 2>&1
+          # Delayed growth: longer warm-up, then sustained writes over ~35m (~640Mi total).
+          sleep 240
+          for i in $(seq 1 160); do
+            dd if=/dev/zero of="/data/delayed-${i}.bin" bs=1M count=4 >/dev/null 2>&1
             sync
-            sleep 10
+            sleep 12
           done
           sleep 1800
       volumeMounts:

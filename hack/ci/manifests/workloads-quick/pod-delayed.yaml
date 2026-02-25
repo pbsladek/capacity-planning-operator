@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: cpo-ci-steady
+  name: cpo-ci-delayed
   namespace: default
 spec:
   restartPolicy: Never
@@ -12,11 +12,12 @@ spec:
       args:
         - |
           set -eu
-          # Steady linear growth over ~32m (~760Mi total).
-          for i in $(seq 1 190); do
-            dd if=/dev/zero of="/data/steady-${i}.bin" bs=1M count=4 >/dev/null 2>&1
+          # Quick delayed profile: longer warm-up then sustained writes over ~11m (~640Mi total on 1Gi PVC).
+          sleep 120
+          for i in $(seq 1 80); do
+            dd if=/dev/zero of="/data/delayed-${i}.bin" bs=1M count=8 >/dev/null 2>&1
             sync
-            sleep 10
+            sleep 8
           done
           sleep 1800
       volumeMounts:
@@ -25,4 +26,4 @@ spec:
   volumes:
     - name: data
       persistentVolumeClaim:
-        claimName: cpo-ci-steady-pvc
+        claimName: cpo-ci-delayed-pvc

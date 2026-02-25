@@ -12,7 +12,7 @@ spec:
       args:
         - |
           set -eu
-          # Bursty growth over ~24m: periodic larger writes with jittered intra-burst timing (~672Mi total).
+          # Nightly bursty pattern: bursts over ~38m with jittered intra-burst timing (~1640Mi total, ~80% of 2Gi).
           rand_sleep_500_4000() {
             raw="$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -d ' ')"
             if [ -z "${raw}" ]; then
@@ -24,14 +24,14 @@ spec:
             sleep "${secs}"
           }
           burst=0
-          while [ "${burst}" -lt 42 ]; do
+          while [ "${burst}" -lt 82 ]; do
             burst=$((burst + 1))
             for i in $(seq 1 2); do
-              dd if=/dev/zero of="/data/burst-${burst}-${i}.bin" bs=1M count=8 >/dev/null 2>&1
+              dd if=/dev/zero of="/data/burst-${burst}-${i}.bin" bs=1M count=10 >/dev/null 2>&1
               sync
               rand_sleep_500_4000
             done
-            sleep 30
+            sleep 24
           done
           sleep 1800
       volumeMounts:

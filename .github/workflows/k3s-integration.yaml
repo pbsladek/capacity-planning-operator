@@ -53,6 +53,7 @@ jobs:
       PLAN_SAMPLE_INTERVAL: 5s
       PLAN_RECONCILE_INTERVAL: 15s
       PLAN_SAMPLE_RETENTION: "256"
+      CI_WORKLOAD_MANIFEST_DIR: hack/ci/manifests/workloads-quick
       CI_ENABLE_LLM: ${{ inputs.enable_llm && 'true' || 'false' }}
       CI_LLM_PROVIDER: ${{ inputs.enable_llm && 'ollama' || 'disabled' }}
       CI_LLM_MODEL: ${{ inputs.llm_model }}
@@ -137,6 +138,9 @@ jobs:
         env:
           EXPECTED_KUBE_CONTEXT: k3d-${{ env.CLUSTER_NAME }}
         run: bash hack/ci/k3s_integration.sh
+
+      - name: Run Alert Delivery Validation
+        run: bash hack/ci/nightly_alert_delivery.sh
 
       - name: Upload Validation Report Artifact
         if: ${{ always() }}

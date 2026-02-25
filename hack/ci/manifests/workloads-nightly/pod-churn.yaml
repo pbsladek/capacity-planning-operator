@@ -12,9 +12,9 @@ spec:
       args:
         - |
           set -eu
-          # Churn pattern over ~32m with periodic cleanup (~720Mi net).
-          for i in $(seq 1 240); do
-            dd if=/dev/zero of="/data/churn-${i}.bin" bs=1M count=6 >/dev/null 2>&1
+          # Nightly churn pattern: sustained writes with cleanup over ~55m (~1640Mi net, ~80% of 2Gi).
+          for i in $(seq 1 410); do
+            dd if=/dev/zero of="/data/churn-${i}.bin" bs=1M count=8 >/dev/null 2>&1
             sync
             if [ $((i % 4)) -eq 0 ]; then
               rm -f /data/churn-$((i-3)).bin /data/churn-$((i-2)).bin 2>/dev/null || true

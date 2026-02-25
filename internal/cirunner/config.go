@@ -2,6 +2,7 @@ package cirunner
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ type Config struct {
 	KubePromValuesExtraFile         string
 	KubePromChartVersion            string
 	CIManifestDir                   string
+	CIWorkloadManifestDir           string
 	TrendObserveSeconds             int
 	UsageSnapshotInterval           int
 	MinTrendObserveSeconds          int
@@ -157,6 +159,7 @@ func LoadConfig() Config {
 		KubePromValuesExtraFile:         getenvDefault("KUBE_PROM_VALUES_EXTRA_FILE", "hack/ci/kube-prom-values-alerting.yaml"),
 		KubePromChartVersion:            getenvDefault("KUBE_PROM_STACK_CHART_VERSION", "65.8.1"),
 		CIManifestDir:                   getenvDefault("CI_MANIFEST_DIR", "hack/ci/manifests"),
+		CIWorkloadManifestDir:           strings.TrimSpace(os.Getenv("CI_WORKLOAD_MANIFEST_DIR")),
 		TrendObserveSeconds:             getenvInt("TREND_OBSERVE_SECONDS", 480),
 		UsageSnapshotInterval:           getenvInt("USAGE_SNAPSHOT_INTERVAL_SECONDS", 180),
 		MinTrendObserveSeconds:          getenvInt("MIN_TREND_OBSERVE_SECONDS", 240),
@@ -212,4 +215,11 @@ func (c Config) PollInterval() time.Duration {
 		seconds = 5
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func (c Config) WorkloadManifestDir() string {
+	if strings.TrimSpace(c.CIWorkloadManifestDir) != "" {
+		return strings.TrimSpace(c.CIWorkloadManifestDir)
+	}
+	return filepath.Join(c.CIManifestDir, "workloads")
 }

@@ -269,8 +269,11 @@ func ApplyAlertReceiverManifests(ctx context.Context, c *Clients, manifestDir st
 }
 
 func ApplyWorkloadStorageManifests(ctx context.Context, c *Clients, manifestDir string) error {
+	return ApplyWorkloadStorageManifestsFromDir(ctx, c, filepath.Join(manifestDir, "workloads"))
+}
+
+func ApplyWorkloadStorageManifestsFromDir(ctx context.Context, c *Clients, workloadsDir string) error {
 	mapper := c.DiscoveryMapper()
-	workloadsDir := filepath.Join(manifestDir, "workloads")
 	files := []string{
 		filepath.Join(workloadsDir, "pvc-steady.yaml"),
 		filepath.Join(workloadsDir, "pvc-bursty.yaml"),
@@ -282,8 +285,11 @@ func ApplyWorkloadStorageManifests(ctx context.Context, c *Clients, manifestDir 
 }
 
 func ApplyWorkloadPodManifests(ctx context.Context, c *Clients, manifestDir string) error {
+	return ApplyWorkloadPodManifestsFromDir(ctx, c, filepath.Join(manifestDir, "workloads"))
+}
+
+func ApplyWorkloadPodManifestsFromDir(ctx context.Context, c *Clients, workloadsDir string) error {
 	mapper := c.DiscoveryMapper()
-	workloadsDir := filepath.Join(manifestDir, "workloads")
 	files := []string{
 		filepath.Join(workloadsDir, "pod-steady.yaml"),
 		filepath.Join(workloadsDir, "pod-bursty.yaml"),
