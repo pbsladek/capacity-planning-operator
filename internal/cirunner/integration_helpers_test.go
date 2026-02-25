@@ -2,8 +2,10 @@ package cirunner
 
 import (
 	"testing"
+	"time"
 
 	capacityv1 "github.com/pbsladek/capacity-planning-operator/api/v1"
+	"github.com/pbsladek/capacity-planning-operator/internal/civerify"
 )
 
 func TestPVCNames(t *testing.T) {
@@ -40,5 +42,72 @@ func TestTrendHelpers(t *testing.T) {
 	r.cfg.UsageRatioSanityMax = 0
 	if r.hasInvalidUsageRatio(cp) {
 		t.Fatalf("did not expect invalid ratio when sanity max disabled")
+	}
+}
+
+func TestEffectiveGrowthCompareWindowSeconds(t *testing.T) {
+	now := time.Now()
+	r := &IntegrationRunner{
+		cfg: Config{
+			GrowthCompareWindowSeconds: 240,
+			PlanSampleRetention:        999,
+			PlanSampleInterval:         "5s",
+		},
+		state: integrationState{
+			obsStartedAt:  now,
+			obsFinishedAt: now.Add(8 * time.Minute),
+		},
+	}
+	if got := r.effectiveGrowthCompareWindowSeconds(); got != 480 {
+		t.Fatalf("effective window=%d want=480", got)
+	}
+
+	r.cfg.GrowthCompareWindowSeconds = 900
+	if got := r.effectiveGrowthCompareWindowSeconds(); got != 900 {
+		t.Fatalf("effective window=%d want=900", got)
+	}
+}
+
+func TestEffectiveGrowthCompareWindowCappedBySampleRetention(t *testing.T) {
+	now := time.Now()
+	r := &IntegrationRunner{
+		cfg: Config{
+			GrowthCompareWindowSeconds: 240,
+			PlanSampleRetention:        32,
+			PlanSampleInterval:         "5s",
+		},
+		state: integrationState{
+			obsStartedAt:  now,
+			obsFinishedAt: now.Add(8 * time.Minute),
+		},
+	}
+	if got := r.sampleRetentionWindowSeconds(); got != 160 {
+		t.Fatalf("sample retention window=%d want=160", got)
+	}
+	if got := r.effectiveGrowthCompareWindowSeconds(); got != 160 {
+		t.Fatalf("effective window=%d want=160", got)
+	}
+}
+
+func TestGrowthComparisonHint(t *testing.T) {
+	summary := civerify.ComparisonSummary{
+		Rows: []civerify.ComparisonRow{
+			{Name: "a", StatusBytesPerDay: 10, HasPromData: true, PromBytesPerDay: 0},
+			{Name: "b", StatusBytesPerDay: 20, HasPromData: true, PromBytesPerDay: 0},
+			{Name: "c", StatusBytesPerDay: 30, HasPromData: true, PromBytesPerDay: 1},
+		},
+	}
+	if hint := growthComparisonHint(summary); hint == "" {
+		t.Fatalf("expected non-empty hint")
+	}
+
+	okSummary := civerify.ComparisonSummary{
+		Rows: []civerify.ComparisonRow{
+			{Name: "a", StatusBytesPerDay: 10, HasPromData: true, PromBytesPerDay: 8},
+			{Name: "b", StatusBytesPerDay: 20, HasPromData: true, PromBytesPerDay: 19},
+		},
+	}
+	if hint := growthComparisonHint(okSummary); hint != "" {
+		t.Fatalf("unexpected hint: %q", hint)
 	}
 }

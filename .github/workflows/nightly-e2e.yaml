@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       llm_model:
-        description: "Ollama model tag (7B/8B profile)"
+        description: "Ollama model tag (recommended 7B/8B/9B profile)"
         required: true
         type: choice
         options:
           - "mistral:7b"
           - "llama3.1:8b"
+          - "gemma2:9b"
         default: "mistral:7b"
   schedule:
     - cron: "0 5 * * *"
@@ -48,7 +49,7 @@ jobs:
       ALERT_PROPAGATION_TIMEOUT_SECONDS: "600"
       PLAN_SAMPLE_INTERVAL: 5s
       PLAN_RECONCILE_INTERVAL: 15s
-      PLAN_SAMPLE_RETENTION: "32"
+      PLAN_SAMPLE_RETENTION: "256"
       CI_ENABLE_LLM: "true"
       CI_LLM_PROVIDER: "ollama"
       CI_LLM_MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.llm_model || 'mistral:7b' }}

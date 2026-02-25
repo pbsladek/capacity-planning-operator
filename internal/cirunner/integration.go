@@ -997,18 +997,87 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 		MinComparablePVCs:    r.cfg.MinGrowthComparablePVCs,
 		MinMatchingPVCs:      r.cfg.MinGrowthMatchingPVCs,
 	}
-	window := r.cfg.GrowthCompareWindowSeconds
+	window := r.effectiveGrowthCompareWindowSeconds()
+	configuredWindow := r.cfg.GrowthCompareWindowSeconds
+	if configuredWindow < 1 {
+		configuredWindow = 1
+	}
+	observedTrendWindow := r.observedTrendWindowSeconds()
+	sampleWindow := r.sampleRetentionWindowSeconds()
+	fmt.Printf("  growth-compare lookback window: %ds (configured=%ds observedTrend=%ds sampleWindow=%ds)\n", window, configuredWindow, observedTrendWindow, sampleWindow)
 	summary, compareErr := civerify.CompareGrowth(ctx, cpGrowth, func(ctx context.Context, pvcName string) (float64, bool, error) {
 		q := civerify.BuildPVCGrowthDerivQuery("default", pvcName, window)
 		return r.promClient.QueryInstantScalar(ctx, q)
 	}, opts)
 	civerify.PrintGrowthSummary(os.Stdout, summary, window)
 	if compareErr != nil {
+		if hint := growthComparisonHint(summary); hint != "" {
+			return fmt.Errorf("%w (%s)", compareErr, hint)
+		}
 		return compareErr
 	}
 	r.printGrowthInterpretation(cpGrowth, summary, opts)
 	r.state.checkGrowthCompare = fmt.Sprintf("pass (%d/%d matched)", summary.Matched, summary.Comparable)
 	return nil
+}
+
+func (r *IntegrationRunner) observedTrendWindowSeconds() int {
+	if r.state.obsStartedAt.IsZero() || r.state.obsFinishedAt.IsZero() {
+		return 0
+	}
+	seconds := int(r.state.obsFinishedAt.Sub(r.state.obsStartedAt).Seconds())
+	if seconds < 0 {
+		return 0
+	}
+	return seconds
+}
+
+func (r *IntegrationRunner) effectiveGrowthCompareWindowSeconds() int {
+	window := r.cfg.GrowthCompareWindowSeconds
+	if window < 1 {
+		window = 1
+	}
+	if observed := r.observedTrendWindowSeconds(); observed > window {
+		window = observed
+	}
+	if sampleWindow := r.sampleRetentionWindowSeconds(); sampleWindow > 0 && sampleWindow < window {
+		window = sampleWindow
+	}
+	return window
+}
+
+func (r *IntegrationRunner) sampleRetentionWindowSeconds() int {
+	retention := r.cfg.PlanSampleRetention
+	if retention <= 0 {
+		return 0
+	}
+	sampleInterval := parseDurationOr(r.cfg.PlanSampleInterval, 5)
+	seconds := int(sampleInterval.Seconds())
+	if seconds <= 0 {
+		return 0
+	}
+	return retention * seconds
+}
+
+func growthComparisonHint(summary civerify.ComparisonSummary) string {
+	if len(summary.Rows) == 0 {
+		return ""
+	}
+	positiveStatus := 0
+	promZero := 0
+	for _, row := range summary.Rows {
+		if row.StatusBytesPerDay <= 0 || !row.HasPromData {
+			continue
+		}
+		positiveStatus++
+		if row.PromBytesPerDay == 0 {
+			promZero++
+		}
+	}
+	if positiveStatus > 0 && promZero*2 >= positiveStatus {
+		return "Prometheus deriv is zero for most positive-growth PVCs; lookback likely too short or growth happened earlier in the observation window"
+	}
+	return ""
 }
 
 func statusGrowthStats(cpGrowth []civerify.PVCGrowth) (minPerMin, maxPerMin, avgPerMin float64) {

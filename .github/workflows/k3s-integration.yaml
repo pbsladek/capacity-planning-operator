@@ -9,12 +9,13 @@ on:
         type: boolean
         default: false
       llm_model:
-        description: "Ollama model tag (7B/8B profile)"
+        description: "Ollama model tag (recommended 7B/8B/9B profile)"
         required: true
         type: choice
         options:
           - "mistral:7b"
           - "llama3.1:8b"
+          - "gemma2:9b"
         default: "mistral:7b"
 
 permissions:
@@ -51,7 +52,7 @@ jobs:
       ALERT_PROPAGATION_TIMEOUT_SECONDS: "600"
       PLAN_SAMPLE_INTERVAL: 5s
       PLAN_RECONCILE_INTERVAL: 15s
-      PLAN_SAMPLE_RETENTION: "32"
+      PLAN_SAMPLE_RETENTION: "256"
       CI_ENABLE_LLM: ${{ inputs.enable_llm && 'true' || 'false' }}
       CI_LLM_PROVIDER: ${{ inputs.enable_llm && 'ollama' || 'disabled' }}
       CI_LLM_MODEL: ${{ inputs.llm_model }}
