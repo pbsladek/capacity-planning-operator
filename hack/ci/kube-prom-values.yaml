@@ -33,6 +33,11 @@ prometheus:
     retention: 6h
     scrapeInterval: 10s
     evaluationInterval: 10s
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector:
+      matchLabels:
+        release: kube-prometheus-stack
+    serviceMonitorNamespaceSelector: {}
     resources:
       requests:
         cpu: 100m

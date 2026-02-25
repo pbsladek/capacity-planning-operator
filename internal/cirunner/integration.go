@@ -810,6 +810,13 @@ func promCapacityBytesQuery(namespace, pvc string) string {
 	)
 }
 
+func promOperatorPVCSeriesCountQuery(namespace, pvc string) string {
+	return fmt.Sprintf(
+		`count(capacityplan_pvc_usage_bytes{namespace=%q,pvc=%q})`,
+		namespace, pvc,
+	)
+}
+
 func (r *IntegrationRunner) pvcRequestedBytes(ctx context.Context, pvcName string) (int64, bool) {
 	pvc, err := r.clients.Clientset.CoreV1().PersistentVolumeClaims("default").Get(ctx, pvcName, metav1.GetOptions{})
 	if err != nil {
@@ -932,6 +939,38 @@ func (r *IntegrationRunner) printPrometheusPVCRawSnapshot(ctx context.Context, p
 	return mismatchCount
 }
 
+func (r *IntegrationRunner) waitForOperatorPVCMetricsSeries(ctx context.Context, pvcs []string) error {
+	if r.promClient == nil {
+		return fmt.Errorf("prometheus client is not initialized")
+	}
+	if len(pvcs) == 0 {
+		return nil
+	}
+	timeout := 2 * time.Minute
+	if t := time.Duration(r.cfg.PromEndpointReadyTimeout) * time.Second; t > 0 && t < timeout {
+		timeout = t
+	}
+	lastMissing := ""
+	return waitUntil(ctx, timeout, r.cfg.PollInterval(), "Prometheus operator PVC usage series", func(ctx context.Context) (bool, error) {
+		missing := make([]string, 0, len(pvcs))
+		for _, pvc := range pvcs {
+			v, has, err := r.promClient.QueryInstantScalar(ctx, promOperatorPVCSeriesCountQuery("default", pvc))
+			if err != nil || !has || v < 1 {
+				missing = append(missing, pvc)
+			}
+		}
+		if len(missing) == 0 {
+			return true, nil
+		}
+		currentMissing := strings.Join(missing, ",")
+		if currentMissing != lastMissing {
+			fmt.Printf("  waiting for operator metric series in Prometheus (missing: %s)\n", currentMissing)
+			lastMissing = currentMissing
+		}
+		return false, nil
+	})
+}
+
 func (r *IntegrationRunner) countGrowingPVCs(cp *capacityv1.CapacityPlan) int {
 	count := 0
 	for _, pvc := range cp.Status.PVCs {
@@ -991,10 +1030,6 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 	if err != nil {
 		return err
 	}
-	statusByPVC := make(map[string]float64, len(cpGrowth))
-	for _, row := range cpGrowth {
-		statusByPVC[row.Name] = row.StatusBytesPerDay
-	}
 	opts := civerify.CompareOptions{
 		RelativeTolerance:    r.cfg.GrowthCompareRelTol,
 		AbsToleranceBytesDay: r.cfg.GrowthCompareAbsTolBytesDay,
@@ -1018,18 +1053,6 @@ func (r *IntegrationRunner) compareGrowthCalculations(ctx context.Context) error
 			operatorQuery := civerify.BuildOperatorPVCGrowthDerivQuery("default", pvcName, compareWindow)
 			operatorValue, operatorHasData, operatorErr := r.promClient.QueryInstantScalar(ctx, operatorQuery)
 			if operatorErr == nil && operatorHasData {
-				// If operator deriv is zero while status says positive growth, fall back to kubelet deriv
-				// once before accepting zero. This handles startup/backfill timing divergence.
-				if operatorValue != 0 || statusByPVC[pvcName] <= 0 {
-					sourceCounts["operator"]++
-					return operatorValue, operatorHasData, nil
-				}
-				kubeletQuery := civerify.BuildPVCGrowthDerivQuery("default", pvcName, compareWindow)
-				kubeletValue, kubeletHasData, kubeletErr := r.promClient.QueryInstantScalar(ctx, kubeletQuery)
-				if kubeletErr == nil && kubeletHasData && kubeletValue != 0 {
-					sourceCounts["kubelet_fallback"]++
-					return kubeletValue, kubeletHasData, nil
-				}
 				sourceCounts["operator"]++
 				return operatorValue, operatorHasData, nil
 			}
@@ -2135,6 +2158,12 @@ func (r *IntegrationRunner) setupLLMBackendForWorkload(ctx context.Context) erro
 }
 
 func (r *IntegrationRunner) runTrendAndPolicyChecks(ctx context.Context, firstReconcile *metav1.Time) error {
+	pvcs := pvcNames(r.cfg.CIWorkloads)
+	logStep("Waiting for Prometheus to ingest operator PVC metrics")
+	if err := r.waitForOperatorPVCMetricsSeries(ctx, pvcs); err != nil {
+		return err
+	}
+
 	if err := r.observeTrends(ctx); err != nil {
 		return err
 	}
